@@ -1,2 +1,2 @@
 # MovingTargetsLM
-agentic LLM system to track changes in corporate earnings announcements
+agentic LLM system to track target changes in corporate earnings announcements

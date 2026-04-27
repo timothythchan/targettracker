@@ -9,7 +9,7 @@
 
 ## Overview
 
-EarningsLens is a research pipeline that extracts structured signals — **management tone**, **quantitative targets**, and **forward guidance** — from S&P 500 earnings call transcripts using a combination of rule-based NLP (spaCy) and large language models (GPT-4o). Extracted signals are stored in a RAG vector store and routed through a LangGraph multi-agent pipeline to produce interpretable risk reports and Fama-MacBeth alpha estimates.
+MovingTargetsLM is a research pipeline that extracts structured signals — **management tone**, **quantitative targets**, and **forward guidance** — from S&P 500 earnings call transcripts using a combination of rule-based NLP (spaCy) and large language models (GPT-4o). Extracted signals are stored in a RAG vector store and routed through a LangGraph multi-agent pipeline to produce interpretable risk reports and Fama-MacBeth alpha estimates.
 
 ---
 

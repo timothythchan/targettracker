@@ -17,7 +17,8 @@ EarningsLens (MovingTargetsLM) is a Jupyter-notebook-based academic research pip
 
 - **No `src/` directory**: The notebooks import from `src.baseline.*`, `src.llm_extraction.*`, `src.rag.*`, `src.agents.*`, and `src.evaluation.*`, but these modules are not committed to the repo. Running those notebook cells will fail with `ModuleNotFoundError`. All other cells (data exploration, inline code, visualizations) work fine.
 - **No `requirements.txt` or `pyproject.toml`**: Dependencies are inferred from notebook imports. The update script installs all needed packages.
-- **External API keys required**: Notebooks 03–08 require `OPENAI_API_KEY` for LLM extraction. Notebook 01 requires WRDS institutional credentials (`WRDS_USERNAME`). Set these in a `.env` file at the project root.
+- **External API keys required**: Notebooks 03–08 require `OPENAI_API_KEY` for LLM extraction. Notebook 01 requires WRDS institutional credentials (`WRDS_USERNAME`). Set these as environment variables or in a `.env` file at the project root.
+- **WRDS requires interactive password**: The `wrds` Python package prompts for a password interactively. For non-interactive use, create `~/.pgpass` with `wrds-pgdata.wharton.upenn.edu:9737:wrds:USERNAME:PASSWORD`. A `WRDS_PASSWORD` secret is also needed if automating connection.
 - **No automated tests**: There is no `tests/` directory or test framework. Validation is done by running notebook cells.
 - **Data is gitignored**: The `data/` directory with parquet files must be regenerated via WRDS (notebook 01). Without WRDS credentials, data-dependent cells will not run.
 - **ChromaDB runs in-process**: No separate server needed; it persists to `data/cache/chromadb/`.

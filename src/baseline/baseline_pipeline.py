@@ -55,7 +55,7 @@ logger = logging.getLogger("earningslens.baseline.pipeline")
 # Default paths  (relative to project root, i.e. earningslens/)
 # ---------------------------------------------------------------------------
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[3]  # …/earningslens/
+DEFAULT_ROOT = Path(__file__).resolve().parents[2]  # repository root
 DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "transcripts.parquet"
 DEFAULT_TARGETS_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_targets.parquet"
 DEFAULT_MT_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_mt_scores.parquet"
@@ -361,9 +361,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--raw-path",
+        "--input",
+        dest="raw_path",
         type=Path,
         default=DEFAULT_RAW,
         help=f"Path to transcripts.parquet (default: {DEFAULT_RAW})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for default output files. If supplied and --targets-out/"
+            "--mt-out are not supplied, writes spacy_targets.parquet and "
+            "spacy_mt_scores.parquet inside this directory."
+        ),
     )
     parser.add_argument(
         "--targets-out",
@@ -406,9 +418,10 @@ def _build_parser() -> argparse.ArgumentParser:
 # __main__
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point for local, notebook-free baseline execution."""
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -417,21 +430,33 @@ if __name__ == "__main__":
         stream=sys.stdout,
     )
 
+    targets_out = args.targets_out
+    mt_out = args.mt_out
+    if args.output_dir is not None:
+        if targets_out == DEFAULT_TARGETS_OUT:
+            targets_out = args.output_dir / "spacy_targets.parquet"
+        if mt_out == DEFAULT_MT_OUT:
+            mt_out = args.output_dir / "spacy_mt_scores.parquet"
+
     pipeline = BaselinePipeline(
         spacy_model=args.spacy_model,
         compute_persistence=not args.no_persistence,
         persistence_window=args.persistence_window,
         raw_path=args.raw_path,
-        targets_out=args.targets_out,
-        mt_out=args.mt_out,
+        targets_out=targets_out,
+        mt_out=mt_out,
     )
 
     try:
-        targets_df, mt_df = pipeline.run()
-        sys.exit(0)
+        pipeline.run()
+        return 0
     except FileNotFoundError as exc:
         logger.error("Input file error: %s", exc)
-        sys.exit(1)
+        return 1
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected error in pipeline: %s", exc)
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

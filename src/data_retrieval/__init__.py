@@ -3,96 +3,61 @@ data_retrieval
 ==============
 EarningsLens WRDS data-retrieval module.
 
-End-to-end mirror of NB01 v2 — every pull is filtered to the **top-200
-S&P 500 universe** ranked by average market cap over 2010-2023.
-
-Modules
--------
-universe          — Build top-N S&P 500 universe (driver of the whole pipeline)
-returns           — CRSP daily + monthly for the top-200 permnos
-fundamentals      — Compustat quarterly for the top-200 gvkeys
-analyst_forecasts — IBES quarterly summary statistics + SUE
-factors           — Fama-French 5-factor + momentum monthly series
-linkers           — Identifier links (CCM, S&P 500 historical, CIQ map)
-transcripts       — Capital IQ earnings-call transcripts (batched fetch)
-pipeline          — DataPipeline orchestrator
-
-Quick start
------------
->>> from data_retrieval.pipeline import DataPipeline
->>> with DataPipeline(wrds_username="your_username") as pipe:
-...     pipe.run_all(output_dir="data/raw")
-...     pipe.sanity_check("data/raw")
-
-Or run individual modules from the command line, e.g.::
-
-    python -m data_retrieval.universe       --output_dir data/raw
-    python -m data_retrieval.returns        --output_dir data/raw
-    python -m data_retrieval.fundamentals   --output_dir data/raw
-    python -m data_retrieval.analyst_forecasts --output_dir data/raw
-    python -m data_retrieval.factors        --output_dir data/raw
-    python -m data_retrieval.transcripts    --output_dir data/raw --reuse_universe
+The public objects are loaded lazily so importing this package does not open or
+require WRDS-related dependencies until a retrieval function is actually used.
 """
 
-from .analyst_forecasts import (
-    compute_sue,
-    fetch_ibes_summary,
-    save_analyst_forecasts,
-)
-from .factors import fetch_ff5_with_momentum, save_factors
-from .fundamentals import fetch_quarterly_fundamentals, save_fundamentals
-from .linkers import (
-    attach_ticker_to_ciq_map,
-    fetch_ccm_linktable,
-    fetch_ciq_company_map,
-    fetch_sp500_history,
-    save_ciq_map,
-)
-from .pipeline import DataPipeline
-from .returns import fetch_daily_returns, save_returns, subset_monthly_to_universe
-from .transcripts import (
-    assemble_transcripts,
-    build_full_transcript_dataset,
-    fetch_transcript_components,
-    fetch_transcript_metadata,
-    save_transcripts,
-    save_transcript_meta,
-)
-from .universe import (
-    END_DATE,
-    N_FIRMS,
-    RANKING_END,
-    RANKING_START,
-    RETURNS_END_DATE,
-    START_DATE,
-    build_top_n_universe,
-    fetch_crsp_monthly_mcap,
-    load_universe,
-    save_universe,
-)
-
-__all__ = [
+_EXPORTS = {
     # universe
-    "build_top_n_universe", "fetch_crsp_monthly_mcap", "save_universe",
-    "load_universe",
-    "START_DATE", "END_DATE", "RETURNS_END_DATE",
-    "RANKING_START", "RANKING_END", "N_FIRMS",
+    "build_top_n_universe": "universe",
+    "fetch_crsp_monthly_mcap": "universe",
+    "save_universe": "universe",
+    "load_universe": "universe",
+    "START_DATE": "universe",
+    "END_DATE": "universe",
+    "RETURNS_END_DATE": "universe",
+    "RANKING_START": "universe",
+    "RANKING_END": "universe",
+    "N_FIRMS": "universe",
     # returns
-    "fetch_daily_returns", "save_returns", "subset_monthly_to_universe",
+    "fetch_daily_returns": "returns",
+    "save_returns": "returns",
+    "subset_monthly_to_universe": "returns",
     # fundamentals
-    "fetch_quarterly_fundamentals", "save_fundamentals",
+    "fetch_quarterly_fundamentals": "fundamentals",
+    "save_fundamentals": "fundamentals",
     # analyst forecasts
-    "fetch_ibes_summary", "compute_sue", "save_analyst_forecasts",
+    "fetch_ibes_summary": "analyst_forecasts",
+    "compute_sue": "analyst_forecasts",
+    "save_analyst_forecasts": "analyst_forecasts",
     # factors
-    "fetch_ff5_with_momentum", "save_factors",
+    "fetch_ff5_with_momentum": "factors",
+    "save_factors": "factors",
     # linkers
-    "fetch_ccm_linktable", "fetch_sp500_history",
-    "fetch_ciq_company_map", "attach_ticker_to_ciq_map", "save_ciq_map",
+    "fetch_ccm_linktable": "linkers",
+    "fetch_sp500_history": "linkers",
+    "fetch_ciq_company_map": "linkers",
+    "attach_ticker_to_ciq_map": "linkers",
+    "save_ciq_map": "linkers",
     # transcripts
-    "fetch_transcript_metadata", "save_transcript_meta",
-    "fetch_transcript_components",
-    "assemble_transcripts", "save_transcripts",
-    "build_full_transcript_dataset",
+    "fetch_transcript_metadata": "transcripts",
+    "save_transcript_meta": "transcripts",
+    "fetch_transcript_components": "transcripts",
+    "assemble_transcripts": "transcripts",
+    "save_transcripts": "transcripts",
+    "build_full_transcript_dataset": "transcripts",
     # pipeline
-    "DataPipeline",
-]
+    "DataPipeline": "pipeline",
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name: str):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    module = import_module(f".{module_name}", __name__)
+    return getattr(module, name)

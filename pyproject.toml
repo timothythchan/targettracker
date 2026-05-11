@@ -1,0 +1,63 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "movingtargets-lm"
+version = "0.1.0"
+description = "Scriptable EarningsLens / Moving Targets replication and LLM extension pipeline."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "pandas>=2.0",
+  "numpy>=1.24",
+  "pyarrow>=14",
+  "spacy>=3.7",
+  "wrds>=3.2",
+  "httpx>=0.27",
+  "openai>=1.0",
+  "typing-extensions>=4.8",
+  "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+rag = [
+  "chromadb>=0.5",
+  "sentence-transformers>=3.0",
+]
+agents = [
+  "langgraph>=0.1.5",
+]
+demo = [
+  "gradio>=4.0",
+]
+evaluation = [
+  "statsmodels>=0.14",
+  "scipy>=1.11",
+]
+finetune = [
+  "accelerate>=0.30",
+  "bitsandbytes>=0.43; platform_system == 'Linux'",
+  "datasets>=2.19",
+  "peft>=0.11",
+  "torch>=2.2",
+  "transformers>=4.41",
+]
+all = [
+  "chromadb>=0.5",
+  "sentence-transformers>=3.0",
+  "langgraph>=0.1.5",
+  "gradio>=4.0",
+  "statsmodels>=0.14",
+  "scipy>=1.11",
+]
+
+[project.scripts]
+earningslens-data = "src.data_retrieval.pipeline:main"
+earningslens-baseline = "src.baseline.baseline_pipeline:main"
+earningslens-llm = "src.llm_extraction.extraction_pipeline:main"
+earningslens-demo = "demo.app:main"
+
+[tool.setuptools.packages.find]
+include = ["src*", "demo*"]
+exclude = ["notebooks*", "docs*"]

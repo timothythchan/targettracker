@@ -71,6 +71,9 @@ class PipelineConfig:
     temperature: float = 0.0
     spacy_baseline_path: str = ""
     output_filename: str = "llm_targets.parquet"
+    raw_input_path: str = ""
+    processed_output_dir: str = ""
+    limit: int = 0
     log_level: str = "INFO"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -83,12 +86,13 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
     """
     Load all transcript documents from *raw_dir*.
 
+    ``raw_dir`` may be either a directory or a direct ``.parquet`` file path.
     Supports two formats:
       • Individual ``.json`` files — one transcript per file. Each JSON file
         must be an object with a ``"transcript_id"`` key and a ``"components"``
         list. If no ``"transcript_id"`` is present the filename stem is used.
-      • A single ``transcripts.parquet`` file with columns:
-        ``transcript_id``, ``component_type``, ``text``.
+      • A single ``transcripts.parquet`` file (or explicit parquet input) with
+        columns: ``transcript_id``, ``component_type``, ``text``.
 
     Parameters
     ----------
@@ -102,13 +106,13 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
     """
     raw_path = Path(raw_dir)
     if not raw_path.exists():
-        raise FileNotFoundError(f"Raw data directory not found: {raw_dir}")
+        raise FileNotFoundError(f"Raw data path not found: {raw_dir}")
 
     transcripts: List[Dict] = []
 
     # ── Parquet path ───────────────────────────────────────────────────────
-    parquet_file = raw_path / "transcripts.parquet"
-    if parquet_file.exists():
+    parquet_file = raw_path if raw_path.is_file() else raw_path / "transcripts.parquet"
+    if parquet_file.exists() and parquet_file.suffix == ".parquet":
         logger.info("load_transcripts | reading %s", parquet_file)
         try:
             import pandas as pd
@@ -116,6 +120,19 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
             raise ImportError("pandas required: pip install pandas pyarrow") from exc
 
         df = pd.read_parquet(parquet_file)
+        if "transcript_id" not in df.columns and "transcriptid" in df.columns:
+            df = df.rename(columns={"transcriptid": "transcript_id"})
+        if "transcript_id" not in df.columns:
+            # Fall back to one grouped transcript per company-quarter if needed.
+            group_cols = [c for c in ["companyid", "fiscalyear", "fiscalquarter"] if c in df.columns]
+            if group_cols:
+                df["transcript_id"] = df[group_cols].astype(str).agg("_".join, axis=1)
+            else:
+                df["transcript_id"] = df.index.astype(str)
+        if "component_type" not in df.columns:
+            df["component_type"] = 0
+        if "text" not in df.columns:
+            raise ValueError(f"Parquet input {parquet_file} must contain a text column")
         grouped = df.groupby("transcript_id")
         for tid, group in grouped:
             components = group[["text", "component_type"]].to_dict("records")
@@ -124,6 +141,9 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
         return transcripts
 
     # ── JSON files path ────────────────────────────────────────────────────
+    if raw_path.is_file():
+        raise FileNotFoundError(f"Unsupported transcript input file: {raw_path}")
+
     json_files = sorted(raw_path.glob("*.json"))
     if not json_files:
         raise FileNotFoundError(
@@ -352,7 +372,7 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     logger.info("run_pipeline | config: %s", asdict(config))
 
     # ── Load transcripts ───────────────────────────────────────────────────
-    raw_dir = str(Path(config.data_dir) / "raw")
+    raw_dir = config.raw_input_path or str(Path(config.data_dir) / "raw")
     logger.info("run_pipeline | loading transcripts from %s …", raw_dir)
     t0 = time.monotonic()
     transcripts = load_transcripts(raw_dir)
@@ -360,6 +380,10 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         "run_pipeline | loaded %d transcripts in %.2fs",
         len(transcripts), time.monotonic() - t0,
     )
+
+    if config.limit > 0:
+        transcripts = transcripts[: config.limit]
+        logger.info("run_pipeline | limited run to first %d transcripts", len(transcripts))
 
     if not transcripts:
         logger.error("run_pipeline | no transcripts found — aborting")
@@ -396,7 +420,7 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     )
 
     # ── Save results ───────────────────────────────────────────────────────
-    processed_dir = Path(config.data_dir) / "processed"
+    processed_dir = Path(config.processed_output_dir) if config.processed_output_dir else Path(config.data_dir) / "processed"
     output_path = str(processed_dir / config.output_filename)
     n_saved = save_results(results, output_path)
 
@@ -490,6 +514,19 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Root data directory containing raw/ and processed/ sub-dirs",
     )
     p.add_argument(
+        "--input",
+        "--raw-input-path",
+        dest="raw_input_path",
+        default="",
+        help="Optional direct transcript input path (parquet file or JSON directory).",
+    )
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help="Optional number of transcripts to process for smoke tests (default: all).",
+    )
+    p.add_argument(
         "--max-concurrent",
         type=int,
         default=10,
@@ -516,6 +553,11 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--output",
         default="llm_targets.parquet",
         help="Output filename under data/processed/ (default: llm_targets.parquet)",
+    )
+    p.add_argument(
+        "--output-dir",
+        default="",
+        help="Optional processed output directory; overrides data-dir/processed location.",
     )
     p.add_argument(
         "--log-level",
@@ -548,6 +590,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         temperature=args.temperature,
         spacy_baseline_path=args.spacy_baseline,
         output_filename=args.output,
+        raw_input_path=args.raw_input_path,
+        processed_output_dir=args.output_dir,
+        limit=args.limit,
         log_level=args.log_level,
     )
 

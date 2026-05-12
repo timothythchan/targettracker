@@ -1155,14 +1155,15 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
 # Entry point
 # ===========================================================================
 
-if __name__ == "__main__":
+def main(argv=None) -> int:
+    """Launch the local Gradio app from a normal Python process."""
     import argparse
 
     parser = argparse.ArgumentParser(description="Launch EarningsLens Gradio demo")
     parser.add_argument("--share", action="store_true", help="Create public Gradio link")
     parser.add_argument("--port", type=int, default=7860, help="Port to listen on")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     demo = build_interface()
     demo.launch(
@@ -1171,3 +1172,8 @@ if __name__ == "__main__":
         share=args.share,
         show_error=True,
     )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

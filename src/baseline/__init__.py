@@ -1,22 +1,12 @@
 """
 earningslens.src.baseline
 =========================
-Layer 1 — spaCy Baseline Pipeline
+Layer 1 — spaCy Baseline Pipeline.
 
-Implements the Cohen & Nguyen (2024) "Moving Targets" NLP extraction
-methodology using spaCy NER and dependency parsing.
-
-Public API
-----------
-SpacyTargetExtractor  — extract performance targets from transcript text
-MovingTargetsComputer — compute MT_{i,t} and related measures
-BaselinePipeline      — end-to-end orchestration
-add_persistence_flags — convenience helper to augment MT DataFrame
+Imports are resolved lazily so command-line entry points can be discovered
+without importing heavyweight NLP dependencies until the relevant class or
+constant is used.
 """
-
-from .target_extractor import SpacyTargetExtractor, GOAL_VERBS, NER_LABELS, FINANCIAL_LABELS
-from .moving_targets import MovingTargetsComputer, add_persistence_flags
-from .baseline_pipeline import BaselinePipeline
 
 __all__ = [
     "SpacyTargetExtractor",
@@ -27,3 +17,19 @@ __all__ = [
     "NER_LABELS",
     "FINANCIAL_LABELS",
 ]
+
+
+def __getattr__(name: str):
+    if name in {"SpacyTargetExtractor", "GOAL_VERBS", "NER_LABELS", "FINANCIAL_LABELS"}:
+        from . import target_extractor
+
+        return getattr(target_extractor, name)
+    if name in {"MovingTargetsComputer", "add_persistence_flags"}:
+        from . import moving_targets
+
+        return getattr(moving_targets, name)
+    if name == "BaselinePipeline":
+        from .baseline_pipeline import BaselinePipeline
+
+        return BaselinePipeline
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

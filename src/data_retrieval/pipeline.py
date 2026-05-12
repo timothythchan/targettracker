@@ -25,7 +25,7 @@ modules in sequence.  It can also be used as a context manager::
         pipe.sanity_check(raw_dir="data/raw")
 
 Usage (standalone CLI):
-    python -m data_retrieval.pipeline --wrds_user your_username --output_dir data/raw
+    python scripts/run_data_retrieval.py --wrds-user your_username --output-dir data/raw
 """
 
 from __future__ import annotations
@@ -255,11 +255,11 @@ class DataPipeline:
 # ---------------------------------------------------------------------------
 
 
-def _main() -> None:
+def main() -> None:
     parser = argparse.ArgumentParser(description="Run the EarningsLens data-retrieval pipeline.")
-    parser.add_argument("--wrds_user", required=False,
+    parser.add_argument("--wrds_user", "--wrds-user", dest="wrds_user", required=False,
                         help="WRDS username (uses .pgpass if omitted).")
-    parser.add_argument("--output_dir", default="data/raw")
+    parser.add_argument("--output_dir", "--output-dir", dest="output_dir", default="data/raw")
     parser.add_argument("--n_firms", type=int, default=N_FIRMS)
     parser.add_argument("--start_date", default=START_DATE)
     parser.add_argument("--end_date", default=END_DATE)
@@ -283,4 +283,4 @@ def _main() -> None:
 
 
 if __name__ == "__main__":
-    _main()
+    main()

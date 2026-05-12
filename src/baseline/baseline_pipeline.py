@@ -3,7 +3,7 @@ BaselinePipeline — Layer 1 End-to-End Orchestration
 ====================================================
 Orchestrates the full spaCy baseline pipeline for the EarningsLens project:
 
-  1. Load raw transcript data from  data/raw/transcripts.parquet
+  1. Load raw transcript data from  data/raw/ciq_transcripts.parquet
   2. Group transcripts by (companyid, fiscalyear, fiscalquarter)
   3. Run SpacyTargetExtractor on every transcript component
   4. Normalise extracted targets for cross-quarter matching
@@ -13,14 +13,13 @@ Orchestrates the full spaCy baseline pipeline for the EarningsLens project:
        data/processed/spacy_targets.parquet   — all extracted targets
        data/processed/spacy_mt_scores.parquet — MT measures per (company, quarter)
 
-Expected schema for  data/raw/transcripts.parquet
---------------------------------------------------
-Required columns:
-  companyid     : str or int   — unique company identifier
-  fiscalyear    : int          — fiscal year (e.g. 2023)
-  fiscalquarter : int          — fiscal quarter (1-4)
-  component_type: int          — 2=Presentation, 3=Analyst Q, 4=Mgmt Answer
-  text          : str          — transcript component text
+Expected schema for  data/raw/ciq_transcripts.parquet
+------------------------------------------------------
+The loader accepts either normalized notebook columns:
+  companyid, fiscalyear, fiscalquarter, component_type, text
+
+or the WRDS CIQ retrieval output:
+  companyid, year, quarter, component_type_id, componenttext
 
 Optional columns (passed through to targets parquet):
   transcriptid, keydeveventid, transcriptpersonid, componentorder, etc.
@@ -33,21 +32,24 @@ import logging
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
-import pandas as pd
 
-try:
-    from .moving_targets import MovingTargetsComputer, add_persistence_flags
-    from .target_extractor import SpacyTargetExtractor
-except ImportError:
-    # Allow direct execution: python baseline_pipeline.py
-    import sys as _sys
-    from pathlib import Path as _Path
-    _src_root = str(_Path(__file__).resolve().parent.parent)
-    _sys.path.insert(0, _src_root)
-    from baseline.moving_targets import MovingTargetsComputer, add_persistence_flags  # type: ignore
-    from baseline.target_extractor import SpacyTargetExtractor  # type: ignore
+def _load_pipeline_components() -> Tuple[Any, Any, Any]:
+    """Import heavy baseline components only when the pipeline actually runs."""
+    try:
+        from .moving_targets import MovingTargetsComputer, add_persistence_flags
+        from .target_extractor import SpacyTargetExtractor
+    except ImportError:
+        # Allow direct execution: python baseline_pipeline.py
+        import sys as _sys
+        from pathlib import Path as _Path
+        _src_root = str(_Path(__file__).resolve().parent.parent)
+        _sys.path.insert(0, _src_root)
+        from baseline.moving_targets import MovingTargetsComputer, add_persistence_flags  # type: ignore
+        from baseline.target_extractor import SpacyTargetExtractor  # type: ignore
+
+    return MovingTargetsComputer, add_persistence_flags, SpacyTargetExtractor
 
 logger = logging.getLogger("earningslens.baseline.pipeline")
 
@@ -55,8 +57,8 @@ logger = logging.getLogger("earningslens.baseline.pipeline")
 # Default paths  (relative to project root, i.e. earningslens/)
 # ---------------------------------------------------------------------------
 
-DEFAULT_ROOT = Path(__file__).resolve().parents[3]  # …/earningslens/
-DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "transcripts.parquet"
+DEFAULT_ROOT = Path(__file__).resolve().parents[2]  # repository root
+DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "ciq_transcripts.parquet"
 DEFAULT_TARGETS_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_targets.parquet"
 DEFAULT_MT_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_mt_scores.parquet"
 
@@ -106,8 +108,8 @@ class BaselinePipeline:
         self.mt_out = Path(mt_out) if mt_out else DEFAULT_MT_OUT
 
         # Lazy-initialised in run()
-        self._extractor: Optional[SpacyTargetExtractor] = None
-        self._computer: Optional[MovingTargetsComputer] = None
+        self._extractor: Optional[Any] = None
+        self._computer: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,6 +134,9 @@ class BaselinePipeline:
         raw_df = self._load_transcripts()
 
         # Step 2: Initialise NLP components
+        MovingTargetsComputer, add_persistence_flags_fn, SpacyTargetExtractor = (
+            _load_pipeline_components()
+        )
         self._extractor = SpacyTargetExtractor(model_name=self.spacy_model)
         self._computer = MovingTargetsComputer(
             persistence_window=self.persistence_window
@@ -146,7 +151,7 @@ class BaselinePipeline:
         # Step 5: Optionally add persistence flags
         if self.compute_persistence and not mt_df.empty:
             logger.info("Computing persistence flags (window=%d quarters) …", self.persistence_window)
-            mt_df = add_persistence_flags(mt_df, target_sets, self.persistence_window)
+            mt_df = add_persistence_flags_fn(mt_df, target_sets, self.persistence_window)
 
         # Step 6: Save outputs
         self._save_outputs(targets_df, mt_df)
@@ -168,24 +173,39 @@ class BaselinePipeline:
     # ------------------------------------------------------------------
 
     def _load_transcripts(self) -> pd.DataFrame:
-        """Load and validate the raw transcripts parquet file."""
+        """Load, normalize, and validate a raw transcripts parquet file.
+
+        The WRDS retrieval pipeline writes ``ciq_transcripts.parquet`` with
+        Capital IQ names such as ``componenttext``, ``component_type_id``,
+        ``year``, and a string ``quarter`` (for example ``2023Q4``). Older
+        notebook exports may already use the normalized baseline names. This
+        loader accepts both schemas so the script pipeline can run directly on
+        the retrieval output without a manual notebook conversion step.
+        """
         if not self.raw_path.exists():
             raise FileNotFoundError(
                 f"Raw transcript file not found: {self.raw_path}\n"
                 "Please place the data file at the expected path or pass "
-                "--raw-path to the CLI."
+                "--raw-path/--input to the CLI."
             )
+
+        try:
+            import pandas as pd
+        except ImportError as exc:
+            raise ImportError("pandas required: pip install pandas pyarrow") from exc
 
         logger.info("Loading transcripts from %s …", self.raw_path)
         df = pd.read_parquet(self.raw_path)
         logger.info("  Loaded %d rows, %d columns.", len(df), len(df.columns))
+
+        df = self._normalize_transcript_schema(df)
 
         # Validate required columns
         required = {"companyid", "fiscalyear", "fiscalquarter", "component_type", "text"}
         missing = required - set(df.columns)
         if missing:
             raise ValueError(
-                f"transcripts.parquet is missing required columns: {missing}\n"
+                f"transcript input is missing required columns after normalization: {missing}\n"
                 f"Available columns: {list(df.columns)}"
             )
 
@@ -202,6 +222,36 @@ class BaselinePipeline:
             n_calls,
             df["companyid"].nunique(),
         )
+        return df
+
+    @staticmethod
+    def _normalize_transcript_schema(df: "pd.DataFrame") -> "pd.DataFrame":
+        """Return *df* with baseline-compatible transcript column names."""
+        import pandas as pd
+
+        df = df.copy()
+        rename_map = {
+            "componenttext": "text",
+            "component_type_id": "component_type",
+            "year": "fiscalyear",
+        }
+        for source, target in rename_map.items():
+            if target not in df.columns and source in df.columns:
+                df = df.rename(columns={source: target})
+
+        if "fiscalquarter" not in df.columns:
+            if "quarter" in df.columns:
+                quarter = df["quarter"].astype(str).str.extract(r"Q([1-4])", expand=False)
+                df["fiscalquarter"] = quarter
+                if "fiscalyear" not in df.columns:
+                    year = df["quarter"].astype(str).str.extract(r"(\d{4})", expand=False)
+                    df["fiscalyear"] = year
+            elif "event_date" in df.columns:
+                event_dates = pd.to_datetime(df["event_date"], errors="coerce")
+                df["fiscalquarter"] = event_dates.dt.quarter
+                if "fiscalyear" not in df.columns:
+                    df["fiscalyear"] = event_dates.dt.year
+
         return df
 
     def _extract_all_targets(
@@ -287,6 +337,8 @@ class BaselinePipeline:
             n_errors,
         )
 
+        import pandas as pd
+
         targets_df = pd.DataFrame(all_target_rows) if all_target_rows else pd.DataFrame()
         return targets_df, target_sets
 
@@ -303,6 +355,8 @@ class BaselinePipeline:
             )
             mt_df = self._computer.compute_mt(target_sets)
         else:
+            import pandas as pd
+
             logger.warning("No target sets available — MT scores will be empty.")
             mt_df = pd.DataFrame()
 
@@ -361,9 +415,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--raw-path",
+        "--input",
+        dest="raw_path",
         type=Path,
         default=DEFAULT_RAW,
-        help=f"Path to transcripts.parquet (default: {DEFAULT_RAW})",
+        help=f"Path to CIQ or normalized transcripts parquet (default: {DEFAULT_RAW})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for default output files. If supplied and --targets-out/"
+            "--mt-out are not supplied, writes spacy_targets.parquet and "
+            "spacy_mt_scores.parquet inside this directory."
+        ),
     )
     parser.add_argument(
         "--targets-out",
@@ -406,9 +472,10 @@ def _build_parser() -> argparse.ArgumentParser:
 # __main__
 # ---------------------------------------------------------------------------
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> int:
+    """CLI entry point for local, notebook-free baseline execution."""
     parser = _build_parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     logging.basicConfig(
         level=getattr(logging, args.log_level),
@@ -417,21 +484,33 @@ if __name__ == "__main__":
         stream=sys.stdout,
     )
 
+    targets_out = args.targets_out
+    mt_out = args.mt_out
+    if args.output_dir is not None:
+        if targets_out == DEFAULT_TARGETS_OUT:
+            targets_out = args.output_dir / "spacy_targets.parquet"
+        if mt_out == DEFAULT_MT_OUT:
+            mt_out = args.output_dir / "spacy_mt_scores.parquet"
+
     pipeline = BaselinePipeline(
         spacy_model=args.spacy_model,
         compute_persistence=not args.no_persistence,
         persistence_window=args.persistence_window,
         raw_path=args.raw_path,
-        targets_out=args.targets_out,
-        mt_out=args.mt_out,
+        targets_out=targets_out,
+        mt_out=mt_out,
     )
 
     try:
-        targets_df, mt_df = pipeline.run()
-        sys.exit(0)
+        pipeline.run()
+        return 0
     except FileNotFoundError as exc:
         logger.error("Input file error: %s", exc)
-        sys.exit(1)
+        return 1
     except Exception as exc:  # noqa: BLE001
         logger.exception("Unexpected error in pipeline: %s", exc)
-        sys.exit(2)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -58,7 +58,7 @@ logger = logging.getLogger("earningslens.baseline.pipeline")
 # ---------------------------------------------------------------------------
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]  # repository root
-DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "ciq_transcripts.parquet"
+DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "transcripts.parquet"
 DEFAULT_TARGETS_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_targets.parquet"
 DEFAULT_MT_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_mt_scores.parquet"
 
@@ -420,6 +420,16 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=DEFAULT_RAW,
         help=f"Path to CIQ or normalized transcripts parquet (default: {DEFAULT_RAW})",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help=(
+            "Directory for default output files. If supplied and --targets-out/"
+            "--mt-out are not supplied, writes spacy_targets.parquet and "
+            "spacy_mt_scores.parquet inside this directory."
+        ),
     )
     parser.add_argument(
         "--output-dir",

@@ -10,7 +10,7 @@ but the runnable path is now normal Python modules and scripts.
 Yes. The core pipeline can run on any machine with Python 3.10+:
 
 1. WRDS data retrieval writes raw parquet files under `data/raw/`.
-2. The spaCy baseline reads `data/raw/ciq_transcripts.parquet` and writes baseline
+2. The spaCy baseline reads `data/raw/transcripts.parquet` and writes baseline
    targets and Moving Targets scores under `data/processed/`.
 3. The LLM extractor reads the same transcript data and writes LLM targets under
    `data/processed/`.
@@ -60,19 +60,7 @@ earningslens-data --wrds-user YOUR_WRDS_USERNAME --output-dir data/raw
 
 ```bash
 python scripts/run_spacy_baseline.py \
-  --input data/raw/ciq_transcripts.parquet \
-  --output-dir data/processed
-```
-
-This writes:
-
-- `data/processed/spacy_targets.parquet`
-- `data/processed/spacy_mt_scores.parquet`
-
-Equivalent installed console command:
-
-```bash
-earningslens-baseline --input data/raw/ciq_transcripts.parquet --output-dir data/processed
+  --input data/raw/transcripts.parquet \
 ```
 
 ### 3. Run LLM extraction
@@ -83,7 +71,7 @@ Smoke test on a small subset:
 python scripts/run_llm_extraction.py \
   --backend openai \
   --model gpt-4o-mini \
-  --input data/raw/ciq_transcripts.parquet \
+  --input data/raw/transcripts.parquet \
   --output-dir data/processed \
   --limit 10
 ```
@@ -94,7 +82,7 @@ Full run:
 python scripts/run_llm_extraction.py \
   --backend openai \
   --model gpt-4o-mini \
-  --input data/raw/ciq_transcripts.parquet \
+  --input data/raw/transcripts.parquet \
   --output-dir data/processed \
   --max-concurrent 10
 ```
@@ -105,7 +93,7 @@ This writes `data/processed/llm_targets.parquet` and
 Equivalent installed console command:
 
 ```bash
-earningslens-llm --backend openai --model gpt-4o-mini --input data/raw/ciq_transcripts.parquet --output-dir data/processed --limit 10
+earningslens-llm --backend openai --model gpt-4o-mini --input data/raw/transcripts.parquet --output-dir data/processed --limit 10
 ```
 
 ### 4. Launch the local demo

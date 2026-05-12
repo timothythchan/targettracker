@@ -10,4 +10,4 @@ if str(PROJECT_ROOT) not in sys.path:
 from src.data_retrieval.cli import main
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

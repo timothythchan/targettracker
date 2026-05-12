@@ -54,7 +54,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "`python -m pip install -r requirements.txt` before running the pipeline. "
             f"Original error: {exc}"
         )
-        return 2
 
     with DataPipeline(
         wrds_username=args.wrds_user,

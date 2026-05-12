@@ -53,10 +53,10 @@ all = [
 ]
 
 [project.scripts]
-earningslens-data = "src.data_retrieval.pipeline:main"
+earningslens-data = "src.data_retrieval.cli:main"
 earningslens-baseline = "src.baseline.baseline_pipeline:main"
 earningslens-llm = "src.llm_extraction.extraction_pipeline:main"
-earningslens-demo = "demo.app:main"
+earningslens-demo = "demo.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["src*", "demo*"]

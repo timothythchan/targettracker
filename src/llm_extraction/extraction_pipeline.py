@@ -82,6 +82,43 @@ class PipelineConfig:
 # Transcript loader
 # ---------------------------------------------------------------------------
 
+def _find_transcript_parquet(raw_path: Path) -> Optional[Path]:
+    """Return the transcript parquet file in *raw_path*, if present."""
+    for filename in ("transcripts.parquet", "ciq_transcripts.parquet"):
+        candidate = raw_path / filename
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _normalize_transcript_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Normalize notebook and WRDS CIQ transcript schemas for LLM loading."""
+    df = df.copy()
+    rename_map = {
+        "transcriptid": "transcript_id",
+        "componenttext": "text",
+        "component_type_id": "component_type",
+    }
+    for source, target in rename_map.items():
+        if target not in df.columns and source in df.columns:
+            df = df.rename(columns={source: target})
+
+    if "transcript_id" not in df.columns:
+        group_cols = [
+            c for c in ["companyid", "fiscalyear", "fiscalquarter", "year", "quarter"]
+            if c in df.columns
+        ]
+        if group_cols:
+            df["transcript_id"] = df[group_cols].astype(str).agg("_".join, axis=1)
+        else:
+            df["transcript_id"] = df.index.astype(str)
+    if "component_type" not in df.columns:
+        df["component_type"] = 0
+    if "text" not in df.columns:
+        raise ValueError("Parquet transcript input must contain text or componenttext")
+    return df
+
+
 def load_transcripts(raw_dir: str) -> List[Dict]:
     """
     Load all transcript documents from *raw_dir*.
@@ -91,8 +128,10 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
       • Individual ``.json`` files — one transcript per file. Each JSON file
         must be an object with a ``"transcript_id"`` key and a ``"components"``
         list. If no ``"transcript_id"`` is present the filename stem is used.
-      • A single ``transcripts.parquet`` file (or explicit parquet input) with
-        columns: ``transcript_id``, ``component_type``, ``text``.
+      • A single ``transcripts.parquet`` / ``ciq_transcripts.parquet`` file
+        (or explicit parquet input) with columns such as ``transcript_id`` or
+        ``transcriptid``, ``component_type`` or ``component_type_id``, and
+        ``text`` or ``componenttext``.
 
     Parameters
     ----------
@@ -111,8 +150,8 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
     transcripts: List[Dict] = []
 
     # ── Parquet path ───────────────────────────────────────────────────────
-    parquet_file = raw_path if raw_path.is_file() else raw_path / "transcripts.parquet"
-    if parquet_file.exists() and parquet_file.suffix == ".parquet":
+    parquet_file = raw_path if raw_path.is_file() else _find_transcript_parquet(raw_path)
+    if parquet_file is not None and parquet_file.exists() and parquet_file.suffix == ".parquet":
         logger.info("load_transcripts | reading %s", parquet_file)
         try:
             import pandas as pd
@@ -120,19 +159,7 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
             raise ImportError("pandas required: pip install pandas pyarrow") from exc
 
         df = pd.read_parquet(parquet_file)
-        if "transcript_id" not in df.columns and "transcriptid" in df.columns:
-            df = df.rename(columns={"transcriptid": "transcript_id"})
-        if "transcript_id" not in df.columns:
-            # Fall back to one grouped transcript per company-quarter if needed.
-            group_cols = [c for c in ["companyid", "fiscalyear", "fiscalquarter"] if c in df.columns]
-            if group_cols:
-                df["transcript_id"] = df[group_cols].astype(str).agg("_".join, axis=1)
-            else:
-                df["transcript_id"] = df.index.astype(str)
-        if "component_type" not in df.columns:
-            df["component_type"] = 0
-        if "text" not in df.columns:
-            raise ValueError(f"Parquet input {parquet_file} must contain a text column")
+        df = _normalize_transcript_dataframe(df)
         grouped = df.groupby("transcript_id")
         for tid, group in grouped:
             components = group[["text", "component_type"]].to_dict("records")

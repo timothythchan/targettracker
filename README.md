@@ -61,18 +61,6 @@ earningslens-data --wrds-user YOUR_WRDS_USERNAME --output-dir data/raw
 ```bash
 python scripts/run_spacy_baseline.py \
   --input data/raw/transcripts.parquet \
-  --output-dir data/processed
-```
-
-This writes:
-
-- `data/processed/spacy_targets.parquet`
-- `data/processed/spacy_mt_scores.parquet`
-
-Equivalent installed console command:
-
-```bash
-earningslens-baseline --input data/raw/transcripts.parquet --output-dir data/processed
 ```
 
 ### 3. Run LLM extraction
@@ -132,13 +120,11 @@ The baseline pipeline expects a parquet file with at least:
 
 The LLM pipeline accepts either:
 
-- a directory containing `transcripts.parquet`,
+- a directory containing `transcripts.parquet` or `ciq_transcripts.parquet`,
 - a direct parquet file path via `--input`, or
 - a directory of JSON transcript documents.
 
-For parquet inputs, the LLM loader accepts either `transcript_id` or
-`transcriptid`; if neither exists, it creates transcript groups from
-`companyid`, `fiscalyear`, and `fiscalquarter` when those columns are present.
+For parquet inputs, the loaders accept both notebook-style columns (`transcript_id`, `text`, `component_type`) and the WRDS CIQ retrieval output (`transcriptid`, `componenttext`, `component_type_id`, `year`, `quarter`). If no transcript ID exists, the LLM loader creates transcript groups from available company-quarter columns.
 
 ## Repository hygiene
 

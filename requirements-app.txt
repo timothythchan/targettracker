@@ -1,0 +1,10 @@
+# Minimal runtime dependencies needed to launch the Gradio app against the
+# bundled sample cache (or a pre-computed real demo cache). Heavy research
+# deps (spaCy models, sentence-transformers, chromadb, statsmodels, wrds,
+# torch, langgraph) are intentionally excluded so the container image and
+# `pip install` time stay small. Install requirements.txt instead if you
+# want the live LangGraph pipeline.
+gradio>=4.0,<7
+pandas>=2.0
+pyarrow>=14
+jinja2>=3.1.5

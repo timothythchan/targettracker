@@ -6,68 +6,77 @@ still documented in `docs/` and exploratory notebooks remain in `notebooks/`,
 but the runnable path is now normal Python modules and scripts — and a Gradio
 **web app** you can launch with a single command.
 
-## Run as an app (no Colab, no WRDS subscription)
+## Run as an app
 
-The repo ships with a small bundled sample cache (`demo/sample_cache/`) so the
-Gradio UI works on a fresh clone with no external data. Pick whichever launcher
-matches your environment:
-
-### Option A — Python (recommended for development)
+The Gradio UI is the end of the pipeline. Once the cache it reads
+(`data/cache/demo/pipeline_cache.json` + `portfolio_screen.json`) has been
+built by `scripts/build_demo_cache.py`, the app is a single command:
 
 ```bash
-python -m pip install -r requirements-app.txt   # ~minimal deps
-python app.py                                   # http://localhost:7860
-```
-
-`requirements-app.txt` contains only what the app needs to render the cached
-results (`gradio`, `pandas`, `pyarrow`, `jinja2`). Use `requirements.txt`
-instead if you want the full research pipeline (spaCy, LangGraph, WRDS, etc.).
-
-### Option B — Make
-
-```bash
-make install   # installs requirements-app.txt
-make app       # launches on http://127.0.0.1:7860
-```
-
-### Option C — Docker
-
-```bash
-docker build -t earningslens-app .
+python -m pip install -r requirements-app.txt    # gradio + pandas + pyarrow
+python app.py                                    # http://localhost:7860
+# Or:
+make app
 docker run --rm -p 7860:7860 earningslens-app
 ```
 
-Then open <http://localhost:7860>.
+If the cache has not been built yet the app still launches but shows a
+prominent "Demo cache not built yet" banner explaining which script to run.
+The repo no longer ships any synthetic stub data — what you see in the UI
+is always real pipeline output.
 
-The app opens with two tabs:
+The app has two tabs:
 
-- **Company Analysis** — per-ticker, per-quarter target table, dropped-target
+- **Company Analysis** — per-ticker / per-quarter targets, dropped-target
   table, risk gauge, and spaCy-vs-LLM comparison.
-- **Portfolio Screen** — ranked Moving-Targets risk score across the universe
-  for a selected quarter.
+- **Portfolio Screen** — ranked Moving-Targets risk score across the demo
+  universe for a selected quarter.
 
-When the bundled sample cache is in use the UI shows a "Sample data mode"
-banner so illustrative numbers are never confused with real research output.
+## Notebook-free pipeline
 
-### Building the real demo cache
+Every step that used to live in a Colab notebook has a corresponding
+Python script under `scripts/`. The mapping is:
 
-To replace the bundled sample with real, end-to-end pipeline output you need a
-WRDS subscription and the full deps:
+| Notebook                              | Script                                       | What it does                                                                                                  |
+| ------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `01_data_retrieval_v2.ipynb`          | `scripts/run_data_retrieval.py`              | Pull CRSP / Compustat / IBES / FF / CIQ from WRDS into `data/raw/`                                            |
+| `02_spacy_baseline_v2.ipynb`          | `scripts/run_spacy_baseline.py`              | spaCy targets + Moving Targets baseline → `spacy_targets.parquet`, `spacy_mt_scores.parquet`                  |
+| `03_llm_extraction_v2.ipynb`          | `scripts/run_llm_extraction.py`              | LLM target extraction (Gemini / OpenAI) → `llm_targets.parquet` (+ optional `llm_targets.jsonl` resumable flow) |
+| `04_rag_matching_v4.ipynb`            | `scripts/run_rag_matching.py`                | Semantic MT via ChromaDB + sentence-transformers → `semantic_mt_scores.parquet`, `per_pair_sims.parquet`      |
+| `04b_threshold_calibration.ipynb`     | `scripts/run_threshold_calibration.py`       | F1 sweep + logistic + bootstrap CI → `mt_calibration_result.json`                                             |
+| `05_langgraph_agents_v3.ipynb`        | _(library only — `src/agents/`)_              | Defines the 4-agent LangGraph pipeline used by the cache builder + Gradio app                                  |
+| `06_demo_preparation_v2.ipynb`        | `scripts/build_demo_cache.py`                | Build `data/cache/demo/{pipeline_cache,portfolio_screen,spacy_results,llm_results}.json`                      |
+
+The notebooks are kept for narrative + diagnostic plots, but everything
+they materialise is now produced by these scripts. Run them in sequence
+with the orchestrator:
 
 ```bash
-python -m pip install -r requirements.txt
-python -m pip install -e .
-python -m spacy download en_core_web_lg
-
-python scripts/run_data_retrieval.py --wrds-user YOUR_WRDS_USERNAME --output-dir data/raw
-python scripts/run_spacy_baseline.py --input data/raw/transcripts.parquet
-python scripts/run_llm_extraction.py --backend openai --model gpt-4o-mini \
-    --input data/raw/transcripts.parquet --output-dir data/processed
-# Notebook 08 materialises data/cache/demo/{pipeline_cache.json,portfolio_screen.json}.
+python scripts/run_pipeline.py                          # everything end-to-end
+python scripts/run_pipeline.py --start rag              # reuse llm_targets.parquet
+python scripts/run_pipeline.py --skip data llm          # reuse upstream parquets
+python scripts/run_pipeline.py --dry-run                # print the plan only
 ```
 
-Once `data/cache/demo/pipeline_cache.json` exists the app picks it up
-automatically on next launch and drops the sample-mode banner.
+Each stage runs as a separate subprocess so a failure in one stage does
+not poison the next.
+
+### What you need before running each stage
+
+- **`data`** stage: a WRDS subscription. Configure as you would for a
+  notebook (`~/.pgpass` or `--wrds-user YOUR_USERNAME`).
+- **`baseline`** stage: a spaCy model. `python -m spacy download en_core_web_lg`.
+- **`llm`** stage: an API key in `OPENAI_API_KEY` / `GOOGLE_API_KEY` /
+  `GEMINI_API_KEY`. Use `--use-jsonl-flow` for resumable runs.
+- **`rag`** stage: `pip install chromadb sentence-transformers` (the heavy
+  RAG deps). GPU is optional via `--device cuda`.
+- **`calibrate`** stage: `pip install scikit-learn` and a labeled
+  `data/processed/mt_calibration_sample_labeled.csv`.
+- **`demo`** stage: all of the above outputs already on disk.
+
+Once `data/cache/demo/pipeline_cache.json` is materialised, the Gradio app
+picks it up on the next launch and the "Demo cache not built yet" banner
+disappears.
 
 ## Can this run without Google Colab?
 
@@ -160,7 +169,22 @@ Equivalent installed console command:
 earningslens-llm --backend openai --model gpt-4o-mini --input data/raw/transcripts.parquet --output-dir data/processed --limit 10
 ```
 
-### 4. Launch the local app
+### 4. Build the demo cache (replaces NB06)
+
+```bash
+python scripts/build_demo_cache.py
+```
+
+This reads everything under `data/raw/` + `data/processed/` and writes
+`data/cache/demo/pipeline_cache.json`, `portfolio_screen.json`,
+`spacy_results.json`, and `llm_results.json` — the four files the Gradio
+app reads.
+
+If `llm_targets.parquet` was produced by an older NB03 run with the
+trailing-zero company_id truncation bug, pass `--repair-llm-parquet` to
+rebuild it from the canonical JSONL.
+
+### 5. Launch the local app
 
 ```bash
 python app.py --host 127.0.0.1 --port 7860

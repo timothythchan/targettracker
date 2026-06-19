@@ -13,10 +13,11 @@ the following all work:
     python app.py --host 0.0.0.0 --port 7860
     python app.py --share
 
-When no real demo cache has been pre-computed under `data/cache/demo/`, the
-app falls back to the bundled illustrative sample cache under
-`demo/sample_cache/`, so a fresh clone can launch the UI without any
-external data sources or notebook execution.
+If no demo cache exists under `data/cache/demo/`, the app still launches
+but shows a "Demo cache not built yet" banner with the script to run:
+
+    python scripts/build_demo_cache.py     # NB06 port
+    python scripts/run_pipeline.py         # full pipeline, end to end
 """
 
 from __future__ import annotations

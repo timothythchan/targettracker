@@ -98,16 +98,15 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Pre-computed cache path
 # ---------------------------------------------------------------------------
-# Primary cache lives under data/cache/demo and is populated by NB08 against a
-# real WRDS pull. The bundled sample cache under demo/sample_cache/ is used as
-# a fallback so a fresh clone can launch the app with realistic-looking
-# illustrative numbers and no data subscriptions.
+# The cache lives under data/cache/demo and is populated by
+# scripts/build_demo_cache.py (the script port of NB06). When the cache is
+# empty the app surfaces a "build the cache first" banner instead of
+# pretending it has data — synthetic stubs are not an acceptable substitute
+# for the real pipeline output.
 _CACHE_DIR = _PROJECT_ROOT / "data" / "cache" / "demo"
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-_SAMPLE_CACHE_DIR = _DEMO_DIR / "sample_cache"
-# Sample data flag is set by _discover_cache so the UI can render a "Sample
-# data" banner instead of pretending illustrative numbers are real output.
-_USING_SAMPLE_CACHE = False
+# True once _discover_cache notices the directory is empty.
+_CACHE_IS_EMPTY = False
 
 # ---------------------------------------------------------------------------
 # Discover available (ticker, quarter) pairs from cache
@@ -116,8 +115,6 @@ _USING_SAMPLE_CACHE = False
 _CACHE_FILE_RE = re.compile(r"^(?P<ticker>[A-Z0-9.\-]+)_(?P<quarter>\d{4}Q[1-4])\.json$")
 _PIPELINE_CACHE_PATH = _CACHE_DIR / "pipeline_cache.json"
 _PORTFOLIO_SCREEN_PATH = _CACHE_DIR / "portfolio_screen.json"
-_SAMPLE_PIPELINE_CACHE_PATH = _SAMPLE_CACHE_DIR / "pipeline_cache.json"
-_SAMPLE_PORTFOLIO_SCREEN_PATH = _SAMPLE_CACHE_DIR / "portfolio_screen.json"
 
 
 def _discover_cache() -> Tuple[List[str], List[str], Dict[str, Dict[str, Any]]]:
@@ -173,30 +170,14 @@ def _discover_cache() -> Tuple[List[str], List[str], Dict[str, Dict[str, Any]]]:
         except Exception as exc:
             logger.warning("Could not load pipeline_cache.json: %s", exc)
 
-    # Fallback to the bundled sample cache only when no real cache was found.
-    # This lets a fresh clone of the repo launch the app with illustrative
-    # numbers without needing a WRDS subscription or pre-computed parquet.
-    global _USING_SAMPLE_CACHE
-    if not cache_map and _SAMPLE_PIPELINE_CACHE_PATH.exists():
-        try:
-            with open(_SAMPLE_PIPELINE_CACHE_PATH) as fh:
-                blob = json.load(fh)
-            entries = blob.get("cache", blob) if isinstance(blob, dict) else {}
-            for key, payload in entries.items():
-                if not isinstance(payload, dict):
-                    continue
-                cache_map[key] = payload
-                if "_" in key:
-                    tk, qt = key.rsplit("_", 1)
-                    tickers.add(tk)
-                    quarters.add(qt)
-            _USING_SAMPLE_CACHE = True
-            logger.info(
-                "No real demo cache found; loaded bundled sample cache from %s",
-                _SAMPLE_PIPELINE_CACHE_PATH,
-            )
-        except Exception as exc:
-            logger.warning("Could not load bundled sample cache: %s", exc)
+    global _CACHE_IS_EMPTY
+    _CACHE_IS_EMPTY = not cache_map
+    if _CACHE_IS_EMPTY:
+        logger.warning(
+            "No demo cache found under %s. Run scripts/build_demo_cache.py "
+            "to materialise pipeline_cache.json and portfolio_screen.json.",
+            _CACHE_DIR,
+        )
 
     return sorted(tickers), sorted(quarters), cache_map
 
@@ -400,22 +381,14 @@ def _unavailable_result(ticker: str, quarter: str, error: str = "") -> Dict[str,
 # ===========================================================================
 
 def _load_portfolio_screen_blob() -> Dict[str, List[Dict[str, Any]]]:
-    """Load NB08's canonical portfolio_screen.json (quarter -> rows).
-
-    Falls back to the bundled sample portfolio screen when the real one is
-    missing, so a fresh clone still shows realistic-looking data in Tab 2.
-    """
-    path = _PORTFOLIO_SCREEN_PATH if _PORTFOLIO_SCREEN_PATH.exists() else (
-        _SAMPLE_PORTFOLIO_SCREEN_PATH if _SAMPLE_PORTFOLIO_SCREEN_PATH.exists() else None
-    )
-    if path is None:
+    """Load the portfolio_screen.json materialised by scripts/build_demo_cache.py."""
+    if not _PORTFOLIO_SCREEN_PATH.exists():
         return {}
     try:
-        with open(path) as f:
+        with open(_PORTFOLIO_SCREEN_PATH) as f:
             blob = json.load(f)
         if not isinstance(blob, dict):
             return {}
-        # Strip the _meta key (sample cache) so iteration over quarters is clean.
         return {k: v for k, v in blob.items() if not k.startswith("_")}
     except Exception as exc:
         logger.warning("Could not load portfolio_screen.json: %s", exc)
@@ -1047,14 +1020,22 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
 """
         )
 
-        if _USING_SAMPLE_CACHE:
+        if _CACHE_IS_EMPTY:
             gr.Markdown(
                 """
-> **Sample data mode.** No pre-computed demo cache was found, so the app is
-> showing bundled illustrative numbers from `demo/sample_cache/`. They are
-> synthetic and intended only to make the UI demonstrable. To populate the
-> real cache, run the data-retrieval and notebook 08 pipeline against WRDS
-> (see `README.md` › *Building the real demo cache*).
+> **Demo cache not built yet.** No pre-computed pipeline output was found
+> under `data/cache/demo/`. The dropdowns above are populated from the
+> default ticker grid but every analysis will return "no data". To
+> materialise the real cache, run the full notebook-free pipeline:
+>
+> ```bash
+> python scripts/run_pipeline.py
+> # or build only the cache stage once upstream parquets exist:
+> python scripts/build_demo_cache.py
+> ```
+>
+> See `README.md` -> *Notebook-free pipeline* for the full mapping of
+> notebooks to scripts.
 """
             )
 

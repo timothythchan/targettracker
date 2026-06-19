@@ -98,6 +98,7 @@ class BaselinePipeline:
         raw_path: Optional[Path] = None,
         targets_out: Optional[Path] = None,
         mt_out: Optional[Path] = None,
+        limit: int = 0,
     ) -> None:
         self.spacy_model = spacy_model
         self.compute_persistence = compute_persistence
@@ -106,6 +107,9 @@ class BaselinePipeline:
         self.raw_path = Path(raw_path) if raw_path else DEFAULT_RAW
         self.targets_out = Path(targets_out) if targets_out else DEFAULT_TARGETS_OUT
         self.mt_out = Path(mt_out) if mt_out else DEFAULT_MT_OUT
+        # NB02 ``N_FULL`` cap: when > 0, cap the run to the first N
+        # ``(companyid, fiscalyear, fiscalquarter)`` groups for smoke tests.
+        self.limit = max(0, int(limit))
 
         # Lazy-initialised in run()
         self._extractor: Optional[Any] = None
@@ -269,6 +273,28 @@ class BaselinePipeline:
         """
         groups = raw_df.groupby(["companyid", "fiscalyear", "fiscalquarter"])
         n_groups = len(groups)
+
+        # Cap the run for smoke tests / dev iteration. Mirrors the NB02
+        # ``N_FULL`` knob (Cell 27): pick the first ``self.limit`` groups
+        # in deterministic groupby order so re-runs hit the same subset.
+        if self.limit > 0 and n_groups > self.limit:
+            keep_keys = [k for k, _ in list(groups)[: self.limit]]
+            keep_set = set(keep_keys)
+            mask = list(
+                zip(
+                    raw_df["companyid"],
+                    raw_df["fiscalyear"],
+                    raw_df["fiscalquarter"],
+                )
+            )
+            raw_df = raw_df[[t in keep_set for t in mask]].copy()
+            groups = raw_df.groupby(["companyid", "fiscalyear", "fiscalquarter"])
+            n_groups = len(groups)
+            logger.info(
+                "Limit applied: %d / %d groups retained (limit=%d).",
+                n_groups, len(keep_set), self.limit,
+            )
+
         logger.info("Extracting targets from %d (company, quarter) groups …", n_groups)
 
         all_target_rows: List[Dict] = []
@@ -432,16 +458,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for default output files. If supplied and --targets-out/"
-            "--mt-out are not supplied, writes spacy_targets.parquet and "
-            "spacy_mt_scores.parquet inside this directory."
-        ),
-    )
-    parser.add_argument(
         "--targets-out",
         type=Path,
         default=DEFAULT_TARGETS_OUT,
@@ -468,6 +484,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         help="Number of prior quarters to test persistence over (default: 12).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help=(
+            "Optional cap on the number of (companyid, fiscalyear, fiscalquarter) "
+            "groups processed (default: 0 = process all). Mirrors NB02 N_FULL."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -509,6 +534,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         raw_path=args.raw_path,
         targets_out=targets_out,
         mt_out=mt_out,
+        limit=args.limit,
     )
 
     try:

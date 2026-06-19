@@ -307,7 +307,28 @@ async def extractor_node(state: PipelineState) -> PipelineState:
     # -----------------------------------------------------------------------
     llm_targets: List[Dict[str, Any]] = []
     llm_succeeded = False
-    LLMExtractorClass = _import_llm_extractor()
+
+    # Fast-path: if the caller (e.g. scripts/build_demo_cache.py, the NB06
+    # port) has pre-extracted targets from llm_targets.parquet, use them
+    # directly. This skips the live LLM call entirely so cache builds do not
+    # re-burn API quota when NB03's outputs are already on disk.
+    pre_extracted = state.get("pre_extracted_targets")
+    if pre_extracted:
+        try:
+            pre_extracted_list = list(pre_extracted)
+        except TypeError:
+            pre_extracted_list = []
+        if pre_extracted_list:
+            logger.info(
+                "[%s] extractor_node: using %d pre_extracted_targets, "
+                "skipping LLM call",
+                company_id,
+                len(pre_extracted_list),
+            )
+            llm_targets = pre_extracted_list
+            llm_succeeded = True
+
+    LLMExtractorClass = _import_llm_extractor() if not llm_succeeded else None
 
     if LLMExtractorClass is not None:
         llm_kwargs = _resolve_llm_kwargs()
@@ -388,7 +409,7 @@ async def extractor_node(state: PipelineState) -> PipelineState:
                 msg = f"[{company_id}] LLMTargetExtractor failed: {exc}"
                 logger.warning(msg)
                 errors.append(msg)
-    else:
+    elif not llm_succeeded:
         msg = f"[{company_id}] LLMTargetExtractor not available; using spaCy fallback"
         logger.warning(msg)
         errors.append(msg)

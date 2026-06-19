@@ -46,34 +46,42 @@ class PipelineConfig:
     """
     Configuration for the LLM extraction pipeline.
 
-    Attributes
-    ----------
-    data_dir       : str  — root data directory (expects data_dir/raw/ and
-                            data_dir/processed/ sub-dirs)
-    backend        : str  — "openai" or "local"
-    model          : str  — model identifier for chosen backend
-    api_key        : str  — OpenAI API key (overrides env var)
-    base_url       : str  — base URL for local vLLM/Ollama server
-    max_concurrent : int  — max simultaneous LLM requests
-    max_tokens     : int  — per-request token budget
-    temperature    : float— sampling temperature (0 = deterministic)
-    spacy_baseline_path : str — path to spaCy baseline parquet for comparison
-    output_filename     : str — output parquet filename under data_dir/processed/
-    log_level      : str  — Python logging level name
+    Most fields map 1:1 to ``LLMTargetExtractor.__init__`` parameters and
+    expose the knobs that NB03 v2 actually used in production. Anything not
+    listed here was hard-coded in the notebook driver cells; if you find
+    yourself patching ``run_pipeline`` to pass a new kwarg, add it here so
+    the CLI stays consistent.
     """
+
     data_dir: str = "data"
     backend: str = "openai"
     model: str = "gpt-4o-mini"
     api_key: str = ""
     base_url: str = "http://localhost:8000/v1"
+
+    # Async / rate-limit knobs (NB03 Cell 27 default values)
     max_concurrent: int = 10
-    max_tokens: int = 2048
+    max_completion_tokens: int = 2048
+    max_input_tokens_per_chunk: int = 12_000
+    request_timeout_s: float = 120.0
+    max_retries: int = 6
+    rpm_cap: Optional[int] = 600
+    tpm_cap: int = 2_000_000
+
     temperature: float = 0.0
+
     spacy_baseline_path: str = ""
     output_filename: str = "llm_targets.parquet"
     raw_input_path: str = ""
     processed_output_dir: str = ""
     limit: int = 0
+
+    # Resumable JSONL-first flow (NB03 Cell 42). When True, run
+    # ``extract_corpus_to_jsonl`` writing to ``output_filename`` with .jsonl
+    # extension first, then flatten to parquet via :func:`save_results_from_jsonl`.
+    use_jsonl_flow: bool = False
+    jsonl_filename: str = "llm_targets.jsonl"
+
     log_level: str = "INFO"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -202,12 +210,96 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
 # Results saver
 # ---------------------------------------------------------------------------
 
+import re
+
+# Match NB03's transcript_id format: "{company_id}_{YYYY}Q{N}" or
+# "{company_id}.0_{YYYY}Q{N}" (the .0 suffix shows up because pandas casts
+# numeric companyids through float at JSONL flatten time).
+_TRANSCRIPT_ID_RE = re.compile(
+    r"^(?P<company_id>\d+(?:\.\d+)?)_(?P<fiscalyear>\d{4})Q(?P<fiscalquarter>[1-4])$"
+)
+
+
+def parse_transcript_id(transcript_id: str) -> Dict[str, Any]:
+    """
+    Split an NB03 transcript_id into ``company_id``, ``fiscalyear``,
+    ``fiscalquarter``, and ``quarter`` (``YYYYQN``).
+
+    Returns a dict with all four keys, with ``None`` values when parsing
+    fails so the caller can still write the row.
+
+    >>> parse_transcript_id("18711.0_2023Q4") == {
+    ...     "company_id": "18711", "fiscalyear": 2023,
+    ...     "fiscalquarter": 4, "quarter": "2023Q4",
+    ... }
+    True
+    >>> parse_transcript_id("free-form-id")
+    {'company_id': 'free-form-id', 'fiscalyear': None, 'fiscalquarter': None, 'quarter': ''}
+    """
+    if not transcript_id:
+        return {"company_id": "", "fiscalyear": None, "fiscalquarter": None, "quarter": ""}
+
+    m = _TRANSCRIPT_ID_RE.match(str(transcript_id))
+    if not m:
+        return {
+            "company_id": str(transcript_id),
+            "fiscalyear": None,
+            "fiscalquarter": None,
+            "quarter": "",
+        }
+
+    cid_raw = m.group("company_id")
+    # Split on '.' so companyids ending in 0 (like IBM's 112350) keep their
+    # trailing zeros — the previous str.rstrip('.0') heuristic had a known
+    # truncation bug, see NB06 Cell 5.
+    company_id = cid_raw.split(".")[0]
+    fiscalyear = int(m.group("fiscalyear"))
+    fiscalquarter = int(m.group("fiscalquarter"))
+    return {
+        "company_id": company_id,
+        "fiscalyear": fiscalyear,
+        "fiscalquarter": fiscalquarter,
+        "quarter": f"{fiscalyear}Q{fiscalquarter}",
+    }
+
+
+def _load_results_from_jsonl(jsonl_path: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Load an ``llm_targets.jsonl`` file into the in-memory results dict."""
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    path = Path(jsonl_path)
+    if not path.exists():
+        logger.warning("JSONL output missing at %s", path)
+        return results
+
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Skipping malformed JSONL line: %s", exc)
+                continue
+            tid = rec.get("transcript_id")
+            if not tid:
+                continue
+            results[tid] = list(rec.get("targets") or [])
+    return results
+
+
 def save_results(
     results: Dict[str, List[Dict]],
     output_path: str,
 ) -> int:
     """
     Flatten extraction results and save to Parquet.
+
+    Each output row carries the original target fields plus the
+    ``transcript_id`` and the parsed metadata columns (``company_id``,
+    ``fiscalyear``, ``fiscalquarter``, ``quarter``) so downstream scripts
+    do not have to re-parse the ID. Numeric ``numerical_value`` is also
+    coerced to float — NB03 Cell 43.
 
     Parameters
     ----------
@@ -225,20 +317,81 @@ def save_results(
 
     rows = []
     for transcript_id, targets in results.items():
+        meta = parse_transcript_id(transcript_id)
         for target in targets:
-            row = {"transcript_id": transcript_id, **target}
-            rows.append(row)
+            rows.append({
+                "transcript_id": transcript_id,
+                **meta,
+                **target,
+            })
 
     if not rows:
         logger.warning("save_results | no targets to save — writing empty file")
         df = pd.DataFrame(columns=["transcript_id"])
     else:
         df = pd.DataFrame(rows)
+        if "fiscalyear" in df.columns:
+            df["fiscalyear"] = df["fiscalyear"].astype("Int64")
+        if "fiscalquarter" in df.columns:
+            df["fiscalquarter"] = df["fiscalquarter"].astype("Int64")
+        if "numerical_value" in df.columns:
+            df["numerical_value"] = pd.to_numeric(
+                df["numerical_value"], errors="coerce"
+            )
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)
     logger.info("save_results | saved %d rows to %s", len(df), output_path)
     return len(df)
+
+
+def repair_parquet_from_jsonl(
+    jsonl_path: str,
+    parquet_path: str,
+    *,
+    backup_suffix: str = "_buggy_company_id",
+) -> Dict[str, int]:
+    """
+    Rebuild ``llm_targets.parquet`` from the canonical JSONL.
+
+    Mirrors NB06 Cell 5: the original NB03 parquet writer used
+    ``str.rstrip('.0')``, which silently truncated company IDs ending in
+    zero (e.g. IBM ``112350`` → ``11235``). This helper reads the JSONL
+    (source of truth), parses ``transcript_id`` correctly via
+    :func:`parse_transcript_id`, and overwrites the parquet — keeping a
+    backup of the previous file so nothing is lost.
+
+    Returns
+    -------
+    Dict[str, int]
+        ``{"rows": N, "transcripts": K, "companies_old": .., "companies_new": ..}``
+    """
+    try:
+        import pandas as pd  # noqa: F401  (only used through save_results)
+    except ImportError as exc:
+        raise ImportError("pandas required: pip install pandas pyarrow") from exc
+
+    jsonl_p = Path(jsonl_path)
+    parquet_p = Path(parquet_path)
+    if not jsonl_p.exists():
+        raise FileNotFoundError(
+            f"JSONL source-of-truth missing: {jsonl_p}. "
+            "Cannot repair parquet without the raw rows."
+        )
+
+    if parquet_p.exists():
+        backup = parquet_p.with_name(parquet_p.stem + backup_suffix + parquet_p.suffix)
+        if not backup.exists():
+            import shutil
+            shutil.copy2(parquet_p, backup)
+            logger.info("Backed up buggy parquet -> %s", backup)
+
+    results = _load_results_from_jsonl(str(jsonl_p))
+    n_rows = save_results(results, str(parquet_p))
+    return {
+        "rows": n_rows,
+        "transcripts": len(results),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -417,29 +570,66 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         return {}
 
     # ── Build extractor ────────────────────────────────────────────────────
+    # NB03 v2 knobs are exposed 1:1 as kwargs. The previous version of
+    # this code passed ``max_tokens_per_request``, which is NOT a parameter
+    # accepted by ``LLMTargetExtractor.__init__`` — the value was silently
+    # dropped and the per-request token budget always defaulted. Bug fixed.
     extractor_kwargs: Dict[str, Any] = {
         "backend": config.backend,
         "model": config.model,
-        "max_tokens_per_request": config.max_tokens,
+        "max_concurrent": config.max_concurrent,
+        "max_completion_tokens": config.max_completion_tokens,
+        "max_input_tokens_per_chunk": config.max_input_tokens_per_chunk,
+        "request_timeout_s": config.request_timeout_s,
+        "max_retries": config.max_retries,
+        "rpm_cap": config.rpm_cap,
+        "tpm_cap": config.tpm_cap,
         "temperature": config.temperature,
     }
     if config.api_key:
         extractor_kwargs["api_key"] = config.api_key
-    if config.backend == "local":
+    # Pass an explicit base_url whenever it is non-empty (Gemini /
+    # OpenAI-compat endpoints use this; the previous logic only forwarded
+    # it for backend=="local").
+    if config.base_url:
         extractor_kwargs["base_url"] = config.base_url
 
     logger.info("run_pipeline | initialising LLMTargetExtractor (backend=%s) …", config.backend)
     extractor = LLMTargetExtractor(**extractor_kwargs)
 
+    # ── Resolve output paths ───────────────────────────────────────────────
+    processed_dir = (
+        Path(config.processed_output_dir)
+        if config.processed_output_dir
+        else Path(config.data_dir) / "processed"
+    )
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(processed_dir / config.output_filename)
+    jsonl_path = str(processed_dir / config.jsonl_filename)
+
     # ── Run async extraction ───────────────────────────────────────────────
     logger.info(
-        "run_pipeline | starting extraction | %d transcripts | max_concurrent=%d",
-        len(transcripts), config.max_concurrent,
+        "run_pipeline | starting extraction | %d transcripts | max_concurrent=%d | jsonl_flow=%s",
+        len(transcripts), config.max_concurrent, config.use_jsonl_flow,
     )
     t_extract = time.monotonic()
-    results = await extractor.extract_corpus(
-        transcripts, max_concurrent=config.max_concurrent
-    )
+
+    if config.use_jsonl_flow:
+        # Resumable production path (NB03 Cell 42). Writes one line per
+        # transcript as it completes, so a Ctrl-C / 503 mid-run does not
+        # lose work — the next launch skips finished transcript_ids.
+        await extractor.extract_corpus_to_jsonl(
+            transcripts,
+            output_path=jsonl_path,
+            max_concurrent=config.max_concurrent,
+        )
+        results: Dict[str, List[Dict[str, Any]]] = _load_results_from_jsonl(jsonl_path)
+    else:
+        # In-memory path (suitable for short interactive runs).
+        results = await extractor.extract_corpus(
+            transcripts, max_concurrent=config.max_concurrent
+        )
+
     elapsed_extract = time.monotonic() - t_extract
     logger.info(
         "run_pipeline | extraction complete in %.2fs | %d transcripts processed",
@@ -447,8 +637,6 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     )
 
     # ── Save results ───────────────────────────────────────────────────────
-    processed_dir = Path(config.processed_output_dir) if config.processed_output_dir else Path(config.data_dir) / "processed"
-    output_path = str(processed_dir / config.output_filename)
     n_saved = save_results(results, output_path)
 
     # ── Compare with spaCy baseline ────────────────────────────────────────
@@ -561,9 +749,50 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-tokens",
+        "--max-completion-tokens",
+        dest="max_completion_tokens",
         type=int,
         default=2048,
-        help="Per-request token budget (default: 2048)",
+        help="Per-request completion token budget (default: 2048)",
+    )
+    p.add_argument(
+        "--max-input-tokens-per-chunk",
+        type=int,
+        default=12_000,
+        help="Cap on the input-token count per LLM chunk (default: 12000, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--request-timeout-s",
+        type=float,
+        default=120.0,
+        help="Per-request timeout in seconds (default: 120, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=6,
+        help="Async retry budget for transient errors (default: 6)",
+    )
+    p.add_argument(
+        "--rpm-cap",
+        type=int,
+        default=600,
+        help="Requests-per-minute cap (default: 600, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--tpm-cap",
+        type=int,
+        default=2_000_000,
+        help="Tokens-per-minute cap (default: 2_000_000)",
+    )
+    p.add_argument(
+        "--use-jsonl-flow",
+        action="store_true",
+        help=(
+            "Use the resumable JSONL-first flow (NB03 Cell 42). "
+            "Each transcript's targets are appended to llm_targets.jsonl as "
+            "they finish, so a Ctrl-C / 503 mid-run does not lose work."
+        ),
     )
     p.add_argument(
         "--temperature",
@@ -613,13 +842,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         api_key=args.api_key,
         base_url=args.base_url,
         max_concurrent=args.max_concurrent,
-        max_tokens=args.max_tokens,
+        max_completion_tokens=args.max_completion_tokens,
+        max_input_tokens_per_chunk=args.max_input_tokens_per_chunk,
+        request_timeout_s=args.request_timeout_s,
+        max_retries=args.max_retries,
+        rpm_cap=args.rpm_cap,
+        tpm_cap=args.tpm_cap,
         temperature=args.temperature,
         spacy_baseline_path=args.spacy_baseline,
         output_filename=args.output,
         raw_input_path=args.raw_input_path,
         processed_output_dir=args.output_dir,
         limit=args.limit,
+        use_jsonl_flow=args.use_jsonl_flow,
         log_level=args.log_level,
     )
 

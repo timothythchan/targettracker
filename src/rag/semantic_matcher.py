@@ -369,9 +369,17 @@ class SemanticContinuityMatcher:
         threshold_config: Optional[Dict[str, float]] = None,
         n_prior_quarters: int = 4,
         index_current: bool = True,
-    ) -> pd.DataFrame:
+        historical_lag: Optional[int] = None,
+        return_per_pair: bool = False,
+    ) -> "pd.DataFrame | tuple[pd.DataFrame, pd.DataFrame]":
         """
         Compute semantic MT scores for a list of company-quarter observations.
+
+        This is the production batch driver used by ``scripts/run_rag_matching.py``
+        (port of NB04 Cell 40). It is a thin wrapper around
+        ``compute_semantic_mt`` that aggregates one row per company-quarter
+        and, optionally, a long-form per-pair similarity DataFrame matching
+        NB04's ``per_pair_sims.parquet`` output schema.
 
         Parameters
         ----------
@@ -380,12 +388,30 @@ class SemanticContinuityMatcher:
             ``current_targets``.
         threshold_config:
             Cosine threshold overrides.
+        n_prior_quarters:
+            Window-mode prior-quarter count. Ignored when ``historical_lag``
+            is set.
+        index_current:
+            Pass-through to ``compute_semantic_mt``. Set False when the caller
+            has already pre-indexed the corpus via ``TargetVectorStore.build_full_index``.
+        historical_lag:
+            Paper-strict t-k retrieval lag. None for window mode (legacy),
+            4 for the canonical Moving Targets t-4 setup.
+        return_per_pair:
+            When True, also return the long-form per-pair similarity log
+            (current_label, historical_label, similarity, company_id, quarter).
+            This is what NB04 Cell 40 wrote to ``per_pair_sims.parquet``.
 
         Returns
         -------
-        pd.DataFrame: One row per company-quarter with MT scores and counts.
+        pd.DataFrame
+            One row per company-quarter with MT scores and counts.
+        Tuple[pd.DataFrame, pd.DataFrame]
+            (mt_df, per_pair_df) when ``return_per_pair=True``.
         """
-        rows = []
+        rows: List[Dict[str, Any]] = []
+        per_pair_rows: List[Dict[str, Any]] = []
+
         for cq in company_quarters:
             try:
                 result = self.compute_semantic_mt(
@@ -395,6 +421,7 @@ class SemanticContinuityMatcher:
                     threshold_config=threshold_config,
                     n_prior_quarters=n_prior_quarters,
                     index_current=index_current,
+                    historical_lag=historical_lag,
                 )
                 rows.append(
                     {
@@ -409,6 +436,20 @@ class SemanticContinuityMatcher:
                         "n_dropped": len(result["dropped"]),
                     }
                 )
+
+                if return_per_pair:
+                    sim_df = result.get("similarity_matrix")
+                    if sim_df is not None and not sim_df.empty:
+                        # current targets are columns, historical are rows
+                        for hist_label in sim_df.index:
+                            for cur_label in sim_df.columns:
+                                per_pair_rows.append({
+                                    "current_label": cur_label,
+                                    "historical_label": hist_label,
+                                    "similarity": float(sim_df.loc[hist_label, cur_label]),
+                                    "company_id": result["company_id"],
+                                    "quarter": result["quarter"],
+                                })
             except Exception as exc:
                 logger.error(
                     "Failed to compute semantic MT for %s %s: %s",
@@ -416,7 +457,11 @@ class SemanticContinuityMatcher:
                     cq.get("quarter"),
                     exc,
                 )
-        return pd.DataFrame(rows)
+
+        mt_df = pd.DataFrame(rows)
+        if return_per_pair:
+            return mt_df, pd.DataFrame(per_pair_rows)
+        return mt_df
 
     # ------------------------------------------------------------------
     # Private helpers

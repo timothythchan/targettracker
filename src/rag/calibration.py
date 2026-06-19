@@ -259,6 +259,7 @@ def bootstrap_threshold_ci(
     n_grid_points: int = 101,
     ci_low: float = 2.5,
     ci_high: float = 97.5,
+    rng: Optional[np.random.Generator] = None,
 ) -> Tuple[float, float, np.ndarray]:
     """
     Non-parametric bootstrap CI on the F1-optimal threshold.
@@ -266,6 +267,13 @@ def bootstrap_threshold_ci(
     Returns ``(lower, upper, all_iter_thresholds)``. The third element is
     the full B-length array so the caller can report alternative quantiles
     or histograms without re-running the bootstrap.
+
+    Pass an explicit ``rng`` (``np.random.Generator``) when running both
+    boundaries off one shared stream — that matches NB04b Cell 17, which
+    seeds one global ``np.random.default_rng(20260509)`` and consumes its
+    output across both Maintained-vs-Dropped and Tracked-vs-Dropped runs.
+    Without ``rng``, each call restarts from ``seed`` and the tracked CI
+    will diverge from the notebook because the resampling sequence differs.
     """
     try:
         from sklearn.metrics import f1_score
@@ -274,7 +282,8 @@ def bootstrap_threshold_ci(
             "scikit-learn is required for threshold calibration."
         ) from exc
 
-    rng = np.random.default_rng(seed)
+    if rng is None:
+        rng = np.random.default_rng(seed)
     x = np.asarray(similarity, dtype=float).ravel()
     y = np.asarray(y, dtype=int)
     w = np.asarray(weights, dtype=float)
@@ -359,11 +368,16 @@ def run_calibration(
         name="tracked_threshold",
     )
 
+    # Share one RNG stream across both boundaries — NB04b Cell 17 declares
+    # ``RNG = np.random.default_rng(20260509)`` once and calls the bootstrap
+    # back-to-back, so the tracked-boundary CI depends on the maintained
+    # bootstrap's draws. Reseeding per-call would silently diverge.
+    bootstrap_rng = np.random.default_rng(bootstrap_seed)
     mvd_lo, mvd_hi, _ = bootstrap_threshold_ci(
-        mvd_x, mvd_y, mvd_w, n_iter=bootstrap_iter, seed=bootstrap_seed,
+        mvd_x, mvd_y, mvd_w, n_iter=bootstrap_iter, rng=bootstrap_rng,
     )
     tvd_lo, tvd_hi, _ = bootstrap_threshold_ci(
-        tvd_x, tvd_y, tvd_w, n_iter=bootstrap_iter, seed=bootstrap_seed,
+        tvd_x, tvd_y, tvd_w, n_iter=bootstrap_iter, rng=bootstrap_rng,
     )
 
     return {
@@ -419,13 +433,23 @@ def save_calibration_result(
     if meta_path is None:
         return
 
+    # Match NB04b Cell 21: write paths RELATIVE to the meta file's directory
+    # (typically ``data/processed/``) so the artifact is portable across
+    # machines and matches the notebook's reviewer-readable string.
+    def _maybe_relative(target: Path, base: Path) -> str:
+        try:
+            return str(Path(target).relative_to(base))
+        except (TypeError, ValueError):
+            return str(target)
+
+    meta_base = Path(meta_path).parent
     meta = {
         "thresholds": {
             "maintained": result["maintained_threshold"]["calibrated_f1"],
             "rephrased":  result["tracked_threshold"]["calibrated_f1"],
         },
-        "calibration_source": str(result_path),
-        "labeled_csv": str(labeled_csv) if labeled_csv else None,
+        "calibration_source": _maybe_relative(result_path, meta_base),
+        "labeled_csv": _maybe_relative(labeled_csv, meta_base) if labeled_csv else None,
         "lag": "t-4",
         "n_calibration_pairs": result["sample"]["n_total"],
         "auc_maintained": result["maintained_threshold"]["auc"],

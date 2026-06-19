@@ -440,13 +440,20 @@ class SemanticContinuityMatcher:
                 if return_per_pair:
                     sim_df = result.get("similarity_matrix")
                     if sim_df is not None and not sim_df.empty:
-                        # current targets are columns, historical are rows
-                        for hist_label in sim_df.index:
-                            for cur_label in sim_df.columns:
+                        # TargetVectorStore.compute_similarity returns a matrix
+                        # with rows=current and columns=historical (see the
+                        # docstring on vector_store.py around line 428). NB04
+                        # Cell 40 flattens via ``sim.stack()`` which yields
+                        # ``(level_0=row=current, level_1=column=historical)``;
+                        # mirror that here so the per_pair_sims.parquet schema
+                        # (current_label, historical_label, similarity) means
+                        # the same thing in script and notebook.
+                        for cur_label in sim_df.index:
+                            for hist_label in sim_df.columns:
                                 per_pair_rows.append({
                                     "current_label": cur_label,
                                     "historical_label": hist_label,
-                                    "similarity": float(sim_df.loc[hist_label, cur_label]),
+                                    "similarity": float(sim_df.loc[cur_label, hist_label]),
                                     "company_id": result["company_id"],
                                     "quarter": result["quarter"],
                                 })

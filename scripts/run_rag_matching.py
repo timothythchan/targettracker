@@ -158,14 +158,34 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     return p
 
 
-def _resolve_thresholds(args: argparse.Namespace) -> Tuple[Dict[str, float], List[str]]:
-    """Pick the operational thresholds following NB04 Cell 34's preference order."""
-    notes: List[str] = []
+def _resolve_thresholds(
+    args: argparse.Namespace,
+    data_processed: Path,
+) -> Tuple[Dict[str, float], List[str]]:
+    """Pick the operational thresholds following NB04 Cell 34's preference order.
 
+    Resolution order (matches the notebook):
+
+    1. ``--calibration <path>`` if supplied.
+    2. Auto-discover ``data/processed/mt_calibration_result.json`` if it
+       exists (NB04 Cell 34 reads this without an explicit flag).
+    3. Fall back to the locked v1 thresholds ``{0.65, 0.40}``.
+    4. Apply any ``--maintained-threshold`` / ``--rephrased-threshold``
+       overrides on top of the resolved baseline.
+    """
+    notes: List[str] = []
+    default_calib_path = data_processed / "mt_calibration_result.json"
+
+    calibration_path: Optional[Path] = None
     if args.calibration:
+        calibration_path = args.calibration
+    elif default_calib_path.exists():
+        calibration_path = default_calib_path
+
+    if calibration_path:
         from src.rag.calibration import load_calibrated_thresholds
-        thresholds = load_calibrated_thresholds(args.calibration)
-        notes.append(f"calibrated from {args.calibration}")
+        thresholds = load_calibrated_thresholds(calibration_path)
+        notes.append(f"calibrated from {calibration_path}")
     else:
         thresholds = dict(LOCKED_THRESHOLDS)
         notes.append("locked v1 fallback {0.65, 0.40}")
@@ -176,6 +196,15 @@ def _resolve_thresholds(args: argparse.Namespace) -> Tuple[Dict[str, float], Lis
     if args.rephrased_threshold is not None:
         thresholds["rephrased"] = float(args.rephrased_threshold)
         notes.append(f"--rephrased-threshold override = {args.rephrased_threshold}")
+
+    # NB04 Cell 34 sanity assert: 0 < rephrased < maintained < 1.
+    m, r = thresholds["maintained"], thresholds["rephrased"]
+    if not (0.0 < r < m < 1.0):
+        logger.warning(
+            "Thresholds out of expected range (0 < rephrased < maintained < 1): "
+            "maintained=%.4f, rephrased=%.4f. Continuing but downstream classification "
+            "may behave unexpectedly.", m, r,
+        )
 
     return thresholds, notes
 
@@ -293,7 +322,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     out_pairs = data_processed / "per_pair_sims.parquet"
     out_meta  = data_processed / "semantic_mt_scores.meta.json"
 
-    thresholds, threshold_notes = _resolve_thresholds(args)
+    # Mirror NB04 Cell 40: wipe stale aggregate / per-pair parquet so a
+    # partial previous run never bleeds into the new artifacts.
+    for stale in (out_agg, out_pairs):
+        if stale.exists():
+            stale.unlink()
+            logger.info("Removed stale %s", stale.name)
+
+    thresholds, threshold_notes = _resolve_thresholds(args, data_processed)
     logger.info("Thresholds: %s (%s)", thresholds, "; ".join(threshold_notes))
 
     targets_df, source_label = _load_targets(data_processed, args.source)
@@ -332,7 +368,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
         logger.info("Indexed %d documents.", n_indexed)
 
-    matcher = SemanticContinuityMatcher(store=store, thresholds=thresholds)
+    # Note: matcher constructor uses ``vector_store`` and ``default_thresholds``
+    # (see SemanticContinuityMatcher.__init__). Pass them by name to avoid the
+    # ``store=...`` / ``thresholds=...`` mistake that NB04 Cells 33/40 hide
+    # behind their inline variable names.
+    matcher = SemanticContinuityMatcher(
+        vector_store=store,
+        default_thresholds=thresholds,
+    )
 
     t0 = time.perf_counter()
     if args.no_per_pair:

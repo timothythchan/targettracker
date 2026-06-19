@@ -57,7 +57,12 @@ class PipelineConfig:
     backend: str = "openai"
     model: str = "gpt-4o-mini"
     api_key: str = ""
-    base_url: str = "http://localhost:8000/v1"
+    # Default base_url is empty so the SDK uses its own default
+    # (api.openai.com for ``backend="openai"``). Pass --base-url to override.
+    # The previous default of ``http://localhost:8000/v1`` poisoned every
+    # Gemini / OpenAI run because the wiring below always forwarded a non-
+    # empty value to ``LLMTargetExtractor``.
+    base_url: str = ""
 
     # Async / rate-limit knobs (NB03 Cell 27 default values)
     max_concurrent: int = 10
@@ -100,10 +105,25 @@ def _find_transcript_parquet(raw_path: Path) -> Optional[Path]:
 
 
 def _normalize_transcript_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Normalize notebook and WRDS CIQ transcript schemas for LLM loading."""
+    """Normalize notebook and WRDS CIQ transcript schemas for LLM loading.
+
+    Output schema after normalization:
+
+        - ``transcript_id`` : ``f"{company_id}_{YYYY}Q{N}"`` (NB03 Cell 6
+          canonical form). The leading company id keeps any ``.0`` suffix
+          pandas added when companyid was stored as a float — downstream
+          :func:`parse_transcript_id` strips it via ``split('.')[0]``.
+        - ``text``           : component text.
+        - ``component_type`` : CIQ component_type_id (2=Presentation,
+          3=Analyst Question, 4=Management Answer; 1=Press Release dropped
+          to match NB03 Cell 5).
+        - ``componentorder`` : preserved when present, for stable sorting.
+    """
+    import pandas as pd
+
     df = df.copy()
     rename_map = {
-        "transcriptid": "transcript_id",
+        "transcriptid": "transcript_id_raw",   # do NOT clobber a real transcript_id
         "componenttext": "text",
         "component_type_id": "component_type",
     }
@@ -111,19 +131,57 @@ def _normalize_transcript_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
         if target not in df.columns and source in df.columns:
             df = df.rename(columns={source: target})
 
-    if "transcript_id" not in df.columns:
-        group_cols = [
-            c for c in ["companyid", "fiscalyear", "fiscalquarter", "year", "quarter"]
-            if c in df.columns
-        ]
-        if group_cols:
-            df["transcript_id"] = df[group_cols].astype(str).agg("_".join, axis=1)
-        else:
-            df["transcript_id"] = df.index.astype(str)
-    if "component_type" not in df.columns:
-        df["component_type"] = 0
     if "text" not in df.columns:
         raise ValueError("Parquet transcript input must contain text or componenttext")
+
+    # Derive fiscalyear / fiscalquarter when the CIQ retrieval output only
+    # has 'quarter' (YYYYQN string) or only an event_date.
+    if "fiscalyear" not in df.columns and "year" in df.columns:
+        df["fiscalyear"] = df["year"]
+    if "fiscalquarter" not in df.columns and "quarter" in df.columns:
+        parsed = (
+            df["quarter"].astype(str).str.extract(r"(?:^|.*Q)([1-4])$", expand=False)
+        )
+        df["fiscalquarter"] = pd.to_numeric(parsed, errors="coerce").astype("Int64")
+    if (
+        ("fiscalyear" not in df.columns or "fiscalquarter" not in df.columns)
+        and "event_date" in df.columns
+    ):
+        ed = pd.to_datetime(df["event_date"], errors="coerce")
+        if "fiscalyear" not in df.columns:
+            df["fiscalyear"] = ed.dt.year
+        if "fiscalquarter" not in df.columns:
+            df["fiscalquarter"] = ed.dt.quarter
+
+    # Component-type filter to match NB03 Cell 5 (keep 2 / 3 / 4 only).
+    if "component_type" in df.columns:
+        ctype_num = pd.to_numeric(df["component_type"], errors="coerce")
+        df = df[ctype_num.isin([2, 3, 4])].copy()
+    else:
+        df["component_type"] = 0
+
+    # Build canonical transcript_id ``{company_id}_{YYYY}Q{N}``. Falls back
+    # to the raw ``transcriptid`` integer / a synthesized id only when the
+    # canonical fields are missing.
+    if (
+        "companyid" in df.columns
+        and "fiscalyear" in df.columns
+        and "fiscalquarter" in df.columns
+    ):
+        cid = df["companyid"].astype(str)
+        fy = df["fiscalyear"].astype("Int64").astype(str)
+        fq = df["fiscalquarter"].astype("Int64").astype(str)
+        df["transcript_id"] = cid + "_" + fy + "Q" + fq
+    elif "transcript_id" in df.columns:
+        df["transcript_id"] = df["transcript_id"].astype(str)
+    elif "transcript_id_raw" in df.columns:
+        df["transcript_id"] = df["transcript_id_raw"].astype(str)
+    else:
+        df["transcript_id"] = df.index.astype(str)
+
+    # Preserve componentorder if present so groupby keeps call order.
+    if "componentorder" in df.columns:
+        df = df.sort_values(["transcript_id", "componentorder"])
     return df
 
 
@@ -168,10 +226,24 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
 
         df = pd.read_parquet(parquet_file)
         df = _normalize_transcript_dataframe(df)
-        grouped = df.groupby("transcript_id")
+        grouped = df.groupby("transcript_id", sort=False)
         for tid, group in grouped:
             components = group[["text", "component_type"]].to_dict("records")
-            transcripts.append({"transcript_id": str(tid), "components": components})
+            # NB03 Cell 6: emit top-level company_id + quarter so
+            # extract_corpus_to_jsonl can stamp them on every JSONL line
+            # without re-parsing transcript_id later.
+            head = group.iloc[0]
+            doc: Dict[str, Any] = {"transcript_id": str(tid), "components": components}
+            if "companyid" in group.columns:
+                doc["company_id"] = str(head["companyid"])
+            if "fiscalyear" in group.columns and "fiscalquarter" in group.columns:
+                try:
+                    fy = int(head["fiscalyear"])
+                    fq = int(head["fiscalquarter"])
+                    doc["quarter"] = f"{fy}Q{fq}"
+                except (TypeError, ValueError):
+                    pass
+            transcripts.append(doc)
         logger.info("load_transcripts | loaded %d transcripts from parquet", len(transcripts))
         return transcripts
 
@@ -338,6 +410,17 @@ def save_results(
             df["numerical_value"] = pd.to_numeric(
                 df["numerical_value"], errors="coerce"
             )
+        # Drop the Unicode-garbage columns that earlier prompt corruption
+        # leaked in (NB06 Cell 5 + Cell 12 both strip these). Keeps
+        # llm_targets.parquet schema-clean even when the JSONL has noise.
+        garbage = [c for c in df.columns
+                   if isinstance(c, str)
+                   and c.startswith("temporal_")
+                   and c != "temporal_framing"]
+        if garbage:
+            df = df.drop(columns=garbage)
+            logger.info("save_results | dropped %d garbage temporal_* columns: %s",
+                        len(garbage), garbage)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)
@@ -588,9 +671,10 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     }
     if config.api_key:
         extractor_kwargs["api_key"] = config.api_key
-    # Pass an explicit base_url whenever it is non-empty (Gemini /
-    # OpenAI-compat endpoints use this; the previous logic only forwarded
-    # it for backend=="local").
+    # Forward base_url ONLY when explicitly set, so the SDK default
+    # (api.openai.com for openai backend, server config for local) wins
+    # otherwise. Local-only backends still need a base_url; require the
+    # caller to pass --base-url for them.
     if config.base_url:
         extractor_kwargs["base_url"] = config.base_url
 
@@ -618,9 +702,11 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         # Resumable production path (NB03 Cell 42). Writes one line per
         # transcript as it completes, so a Ctrl-C / 503 mid-run does not
         # lose work — the next launch skips finished transcript_ids.
+        # NOTE: extract_corpus_to_jsonl accepts the parameter as ``out_path``;
+        # passing ``output_path=`` raises TypeError (the audit flagged this).
         await extractor.extract_corpus_to_jsonl(
             transcripts,
-            output_path=jsonl_path,
+            out_path=jsonl_path,
             max_concurrent=config.max_concurrent,
         )
         results: Dict[str, List[Dict[str, Any]]] = _load_results_from_jsonl(jsonl_path)
@@ -720,8 +806,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--base-url",
-        default="http://localhost:8000/v1",
-        help="Base URL for local vLLM/Ollama server",
+        default="",
+        help=(
+            "Override the SDK base URL. Required for local vLLM/Ollama (e.g. "
+            "http://localhost:8000/v1) and useful for Gemini's OpenAI-compatible "
+            "endpoint (https://generativelanguage.googleapis.com/v1beta/openai/). "
+            "Default empty = use the SDK's own default (api.openai.com)."
+        ),
     )
     p.add_argument(
         "--data-dir",

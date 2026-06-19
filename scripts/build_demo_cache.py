@@ -210,12 +210,16 @@ def _slice_spacy(
     demo_mt = demo_mt[demo_mt["quarter"].isin(demo_quarters)].copy()
     demo_mt["ticker"] = demo_mt["company_id"].astype(float).map(id_to_ticker)
 
+    # NB06 Cell 10 renames first, THEN selects columns. The previous order
+    # ('keep mt_score, rename to mt_spacy, slice by keep_cols') triggered a
+    # KeyError because ``mt_score`` no longer existed after the rename.
+    demo_mt = demo_mt.rename(columns={"mt_score": "mt_spacy"})
     keep_cols = [c for c in [
-        "ticker", "quarter", "mt_score",
+        "ticker", "company_id", "quarter", "mt_spacy",
         "n_targets", "n_targets_tm4", "n_dropped", "n_new",
         "dropped_targets", "financial_drop_ratio", "nonfinancial_drop_ratio",
     ] if c in demo_mt.columns]
-    spacy_mt_df = demo_mt.rename(columns={"mt_score": "mt_spacy"})[keep_cols]
+    spacy_mt_df = demo_mt[keep_cols]
 
     # Build per-(ticker, quarter) target list
     spacy_results: List[Dict[str, Any]] = []
@@ -245,17 +249,21 @@ def _slice_spacy(
 
     cache_dir.mkdir(parents=True, exist_ok=True)
     spacy_cache_path = cache_dir / "spacy_results.json"
+    # NB06 writes the rows with ``mt_spacy`` as the score column name (and
+    # leaves it that way for any external consumer). The Gradio app only
+    # reads portfolio_screen.json, so this file is informational, but we
+    # follow the notebook's schema rather than re-renaming.
     with open(spacy_cache_path, "w") as fh:
         json.dump(
             {
                 "results":   spacy_results,
-                "mt_scores": spacy_mt_df.rename(columns={"mt_spacy": "mt_score"}).to_dict(orient="records"),
+                "mt_scores": spacy_mt_df.to_dict(orient="records"),
             },
             fh,
             default=str,
         )
     logger.info("Wrote %s (%d ticker-quarter entries)", spacy_cache_path, len(spacy_results))
-    return spacy_results, spacy_mt_df.rename(columns={"mt_spacy": "mt_score"})
+    return spacy_results, spacy_mt_df
 
 
 def _slice_llm(
@@ -435,22 +443,32 @@ def _build_portfolio_screen(
     pairs: List[Tuple[str, str]],
     demo_quarters: List[str],
     demo_companies: List[str],
-    spacy_mt_df: "pd.DataFrame",
+    spacy_mt_path: Path,
     ticker_to_companyid: Dict[str, str],
     cache_dir: Path,
 ) -> Path:
     """NB06 Cell 18 — build portfolio_screen.json from the pipeline cache."""
+    import pandas as pd
     from src.data_retrieval.ticker_map import normalise_company_id
 
+    # NB06 Cell 18 reloads the FULL spacy_mt_scores.parquet here (not the
+    # demo-sliced df from _slice_spacy) and keys the lookup on the parquet's
+    # own (company_id, quarter). Reproducing that exactly: when a ticker has
+    # multiple CIQ companyids in the data (legacy entities), keying on
+    # ticker_to_companyid[ticker] would attribute every row to the FIRST
+    # mapped CIQ id and silently mis-key the MT score.
     spacy_lookup: Dict[Tuple[str, str], float] = {}
-    if spacy_mt_df is not None and not spacy_mt_df.empty:
-        for _, row in spacy_mt_df.iterrows():
-            cid_clean = normalise_company_id(
-                ticker_to_companyid.get(str(row.get("ticker", "")).upper(), "")
-            )
-            quarter = str(row.get("quarter"))
-            if cid_clean and quarter:
-                spacy_lookup[(cid_clean, quarter)] = float(row.get("mt_score", 0.0) or 0.0)
+    if spacy_mt_path.exists():
+        spacy_full = pd.read_parquet(spacy_mt_path)
+        if not spacy_full.empty:
+            for _, row in spacy_full.iterrows():
+                cid_clean = normalise_company_id(row.get("company_id"))
+                quarter = str(row.get("quarter") or "")
+                if not cid_clean or not quarter:
+                    continue
+                spacy_lookup[(cid_clean, quarter)] = float(
+                    row.get("mt_score", 0.0) or 0.0
+                )
 
     pair_set = set(pairs)
     portfolio: Dict[str, List[Dict[str, Any]]] = {}
@@ -599,7 +617,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         pairs=pairs,
         demo_quarters=demo_quarters,
         demo_companies=demo_companies,
-        spacy_mt_df=spacy_mt_df,
+        spacy_mt_path=data_processed / "spacy_mt_scores.parquet",
         ticker_to_companyid=ticker_to_companyid,
         cache_dir=cache_dir,
     )

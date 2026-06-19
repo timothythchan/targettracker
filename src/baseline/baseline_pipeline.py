@@ -92,7 +92,11 @@ class BaselinePipeline:
 
     def __init__(
         self,
-        spacy_model: str = "en_core_web_lg",
+        # NB02 Cell 6 loads ``en_core_web_sm``. ``en_core_web_lg`` produces
+        # noticeably different NER counts on the same transcript corpus, so
+        # the script default tracks the notebook to keep MT scores
+        # reproducible. Pass ``--spacy-model en_core_web_lg`` to opt in.
+        spacy_model: str = "en_core_web_sm",
         compute_persistence: bool = True,
         persistence_window: int = 12,
         raw_path: Optional[Path] = None,
@@ -271,29 +275,46 @@ class BaselinePipeline:
             ``(targets_df, target_sets)`` where ``target_sets`` is keyed
             by ``(company_id, quarter_key)``.
         """
+        # Cap the run for smoke tests / dev iteration. Mirrors NB02 Cell 27's
+        # ``N_FULL`` knob, which slices the first N unique ``transcriptid``
+        # values in first-appearance order. When ``transcriptid`` is present
+        # we follow that exactly; otherwise (notebook-style input without a
+        # transcript ID column) fall back to the first N
+        # ``(companyid, fiscalyear, fiscalquarter)`` groups in encounter order.
+        if self.limit > 0:
+            if "transcriptid" in raw_df.columns:
+                ordered_tids = raw_df["transcriptid"].drop_duplicates().tolist()
+                keep_tids = set(ordered_tids[: self.limit])
+                if len(ordered_tids) > self.limit:
+                    raw_df = raw_df[raw_df["transcriptid"].isin(keep_tids)].copy()
+                    logger.info(
+                        "Limit applied: %d / %d transcriptids retained (limit=%d).",
+                        len(keep_tids), len(ordered_tids), self.limit,
+                    )
+            else:
+                groups_preview = raw_df.groupby(
+                    ["companyid", "fiscalyear", "fiscalquarter"], sort=False
+                )
+                if len(groups_preview) > self.limit:
+                    keep_keys = set(
+                        k for k, _ in list(groups_preview)[: self.limit]
+                    )
+                    mask = list(zip(
+                        raw_df["companyid"],
+                        raw_df["fiscalyear"],
+                        raw_df["fiscalquarter"],
+                    ))
+                    raw_df = raw_df[[t in keep_keys for t in mask]].copy()
+                    logger.info(
+                        "Limit applied: %d / %d groups retained "
+                        "(limit=%d, fallback path; transcriptid column missing).",
+                        len(keep_keys),
+                        sum(1 for _ in groups_preview),
+                        self.limit,
+                    )
+
         groups = raw_df.groupby(["companyid", "fiscalyear", "fiscalquarter"])
         n_groups = len(groups)
-
-        # Cap the run for smoke tests / dev iteration. Mirrors the NB02
-        # ``N_FULL`` knob (Cell 27): pick the first ``self.limit`` groups
-        # in deterministic groupby order so re-runs hit the same subset.
-        if self.limit > 0 and n_groups > self.limit:
-            keep_keys = [k for k, _ in list(groups)[: self.limit]]
-            keep_set = set(keep_keys)
-            mask = list(
-                zip(
-                    raw_df["companyid"],
-                    raw_df["fiscalyear"],
-                    raw_df["fiscalquarter"],
-                )
-            )
-            raw_df = raw_df[[t in keep_set for t in mask]].copy()
-            groups = raw_df.groupby(["companyid", "fiscalyear", "fiscalquarter"])
-            n_groups = len(groups)
-            logger.info(
-                "Limit applied: %d / %d groups retained (limit=%d).",
-                n_groups, len(keep_set), self.limit,
-            )
 
         logger.info("Extracting targets from %d (company, quarter) groups …", n_groups)
 
@@ -471,8 +492,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--spacy-model",
-        default="en_core_web_lg",
-        help="spaCy model name (default: en_core_web_lg)",
+        default="en_core_web_sm",
+        help=(
+            "spaCy model name (default: en_core_web_sm, matches NB02 Cell 6). "
+            "Pass en_core_web_lg for higher recall at the cost of a different "
+            "MT panel."
+        ),
     )
     parser.add_argument(
         "--no-persistence",

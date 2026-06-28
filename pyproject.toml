@@ -53,6 +53,11 @@ all = [
 ]
 
 [project.scripts]
+# Unified entry point — `earningslens <subcommand>` covers every stage.
+earningslens = "src.cli:main"
+
+# Legacy per-stage console scripts kept as thin aliases so Makefiles, CI
+# pipelines, and notebooks referring to the old names keep working.
 earningslens-data = "src.data_retrieval.cli:main"
 earningslens-baseline = "src.baseline.baseline_pipeline:main"
 earningslens-llm = "src.llm_extraction.extraction_pipeline:main"

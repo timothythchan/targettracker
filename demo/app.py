@@ -775,6 +775,84 @@ def load_portfolio(quarter_display: str) -> Tuple[pd.DataFrame, str]:
     return df, status
 
 
+# ===========================================================================
+# Tab 3 — Pipeline control
+# ===========================================================================
+# The Pipeline tab lets you run every stage from the web UI itself. Each
+# stage shells out to ``python -m src <subcommand>`` so the CLI and UI take
+# exactly the same code path; the only difference is that the UI tees stdout
+# and stderr into a Textbox in near-real time.
+
+import subprocess
+import shlex
+
+
+def _refresh_status_markdown() -> str:
+    """Render the current pipeline-state table for the Pipeline tab."""
+    try:
+        from src.status import describe_pipeline_status
+        text = describe_pipeline_status(_PROJECT_ROOT / "data")
+    except Exception as exc:
+        text = f"Could not read status: {exc}"
+    return f"```\n{text}\n```"
+
+
+_PIPELINE_STAGES = [
+    ("data",      "WRDS data retrieval (NB01)",        ""),
+    ("baseline",  "spaCy baseline + MT (NB02)",        "--limit 20"),
+    ("llm",       "LLM target extraction (NB03)",      "--limit 5"),
+    ("rag",       "Semantic MT batch (NB04)",          ""),
+    ("calibrate", "Threshold calibration (NB04b)",     ""),
+    ("cache",     "Build Gradio demo cache (NB06)",    ""),
+    ("pipeline",  "Run every stage in order",          "--dry-run"),
+]
+
+
+def _run_stage_streaming(subcommand: str, extra_args: str):
+    """
+    Run ``python -m src <subcommand> <extra_args>`` and yield combined
+    stdout/stderr lines for the Gradio Textbox.
+
+    Yields snapshots of the full log so far so Gradio can stream updates
+    into the read-only Textbox without flicker.
+    """
+    if not subcommand:
+        yield "Select a stage first."
+        return
+
+    cmd: List[str] = [sys.executable, "-m", "src", subcommand]
+    try:
+        cmd.extend(shlex.split(extra_args or ""))
+    except ValueError as exc:
+        yield f"Could not parse extra args: {exc}"
+        return
+
+    header = f"$ {' '.join(shlex.quote(c) for c in cmd)}\n\n"
+    yield header
+
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=str(_PROJECT_ROOT),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+    except OSError as exc:
+        yield header + f"\nFailed to start subprocess: {exc}\n"
+        return
+
+    accumulated = header
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        accumulated += line
+        yield accumulated
+    proc.wait()
+    accumulated += f"\n[exit code {proc.returncode}]\n"
+    yield accumulated
+
+
 def drill_down_report(portfolio_df: pd.DataFrame, evt: gr.SelectData) -> str:
     """Generate a drill-down summary for the selected portfolio row."""
     try:
@@ -1026,16 +1104,17 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
 > **Demo cache not built yet.** No pre-computed pipeline output was found
 > under `data/cache/demo/`. The dropdowns above are populated from the
 > default ticker grid but every analysis will return "no data". To
-> materialise the real cache, run the full notebook-free pipeline:
+> materialise the real cache, open the **Pipeline** tab and click through
+> each stage, or run the unified CLI:
 >
 > ```bash
-> python scripts/run_pipeline.py
-> # or build only the cache stage once upstream parquets exist:
-> python scripts/build_demo_cache.py
+> python -m src pipeline      # run every stage end-to-end
+> python -m src cache         # rebuild only the cache stage
+> python -m src status        # see which artifacts exist on disk
 > ```
 >
 > See `README.md` -> *Notebook-free pipeline* for the full mapping of
-> notebooks to scripts.
+> notebooks to subcommands.
 """
             )
 
@@ -1176,6 +1255,77 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
                 fn=drill_down_report,
                 inputs=[portfolio_tbl],
                 outputs=[drill_down_md],
+            )
+
+        # ---------------------------------------------------------------
+        # Tab 3 — Pipeline control
+        # ---------------------------------------------------------------
+        with gr.Tab("Pipeline"):
+            gr.Markdown(
+                """
+### Run pipeline stages from the web UI
+
+Every button below calls `python -m src <subcommand>` — the same code path
+as the `earningslens` command line. Output streams into the log panel.
+Stages with external dependencies (WRDS, an LLM API key, ChromaDB)
+require those to be configured; click the corresponding stage anyway to
+see the exact error message in the log.
+"""
+            )
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    stage_dd = gr.Dropdown(
+                        choices=[s[0] for s in _PIPELINE_STAGES],
+                        value=_PIPELINE_STAGES[0][0],
+                        label="Stage",
+                        info="Which pipeline subcommand to run",
+                    )
+                with gr.Column(scale=2):
+                    extra_args_tb = gr.Textbox(
+                        value="",
+                        label="Extra args",
+                        info=(
+                            "Forwarded to the subcommand verbatim, e.g. "
+                            "`--limit 50` or `--start rag`."
+                        ),
+                    )
+                with gr.Column(scale=1):
+                    run_stage_btn = gr.Button("Run stage", variant="primary")
+                    refresh_status_btn = gr.Button("Refresh status")
+
+            gr.Markdown(
+                "\n".join(
+                    f"- **`{name}`** — {desc} (suggested extras: `{extras or 'none'}`)"
+                    for name, desc, extras in _PIPELINE_STAGES
+                )
+            )
+
+            status_md = gr.Markdown(_refresh_status_markdown(), label="Status")
+
+            # NOTE: ``show_copy_button`` was removed from gr.Textbox in
+            # Gradio 6.x. Avoid it so the tab loads on both 5.x and 6.x.
+            log_box = gr.Textbox(
+                value="",
+                label="Stage output",
+                lines=22,
+                interactive=False,
+            )
+
+            run_stage_btn.click(
+                fn=_run_stage_streaming,
+                inputs=[stage_dd, extra_args_tb],
+                outputs=[log_box],
+            )
+            run_stage_btn.click(
+                fn=_refresh_status_markdown,
+                inputs=None,
+                outputs=[status_md],
+            )
+            refresh_status_btn.click(
+                fn=_refresh_status_markdown,
+                inputs=None,
+                outputs=[status_md],
             )
 
         gr.Markdown(

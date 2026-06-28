@@ -8,58 +8,78 @@ but the runnable path is now normal Python modules and scripts — and a Gradio
 
 ## Run as an app
 
+The whole project ships behind a single `earningslens` command. Once
+installed via `pip install -e .` (or used as `python -m src`), it
+exposes one subcommand per pipeline stage plus the Gradio UI:
+
+```bash
+python -m src --help                # discover every subcommand
+python -m src status                # which artifacts are on disk
+python -m src baseline --limit 20   # NB02 stage
+python -m src cache                 # NB06 demo cache builder
+python -m src app                   # launch the Gradio UI
+python -m src pipeline              # run every stage in order
+```
+
 The Gradio UI is the end of the pipeline. Once the cache it reads
 (`data/cache/demo/pipeline_cache.json` + `portfolio_screen.json`) has been
-built by `scripts/build_demo_cache.py`, the app is a single command:
+built, the app is a single command:
 
 ```bash
 python -m pip install -r requirements-app.txt    # gradio + pandas + pyarrow
-python app.py                                    # http://localhost:7860
-# Or:
+python -m src app                                # http://localhost:7860
+# Or any of:
+python app.py
 make app
 docker run --rm -p 7860:7860 earningslens-app
 ```
 
 If the cache has not been built yet the app still launches but shows a
-prominent "Demo cache not built yet" banner explaining which script to run.
-The repo no longer ships any synthetic stub data — what you see in the UI
-is always real pipeline output.
+prominent "Demo cache not built yet" banner explaining which subcommand
+to run. The repo no longer ships any synthetic stub data — what you see
+in the UI is always real pipeline output.
 
-The app has two tabs:
+The app has **three** tabs:
 
 - **Company Analysis** — per-ticker / per-quarter targets, dropped-target
   table, risk gauge, and spaCy-vs-LLM comparison.
 - **Portfolio Screen** — ranked Moving-Targets risk score across the demo
   universe for a selected quarter.
+- **Pipeline** — run every pipeline stage from the web UI itself. Each
+  button shells out to `python -m src <subcommand>` and streams the
+  combined stdout/stderr into a log panel, so you can iterate on data
+  pulls and cache rebuilds without leaving the browser.
 
 ## Notebook-free pipeline
 
 Every step that used to live in a Colab notebook has a corresponding
-Python script under `scripts/`. The mapping is:
+subcommand under the unified `earningslens` CLI. The thin standalone
+scripts under `scripts/` are kept for backward compatibility:
 
-| Notebook                              | Script                                       | What it does                                                                                                  |
-| ------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `01_data_retrieval_v2.ipynb`          | `scripts/run_data_retrieval.py`              | Pull CRSP / Compustat / IBES / FF / CIQ from WRDS into `data/raw/`                                            |
-| `02_spacy_baseline_v2.ipynb`          | `scripts/run_spacy_baseline.py`              | spaCy targets + Moving Targets baseline → `spacy_targets.parquet`, `spacy_mt_scores.parquet`                  |
-| `03_llm_extraction_v2.ipynb`          | `scripts/run_llm_extraction.py`              | LLM target extraction (Gemini / OpenAI) → `llm_targets.parquet` (+ optional `llm_targets.jsonl` resumable flow) |
-| `04_rag_matching_v4.ipynb`            | `scripts/run_rag_matching.py`                | Semantic MT via ChromaDB + sentence-transformers → `semantic_mt_scores.parquet`, `per_pair_sims.parquet`      |
-| `04b_threshold_calibration.ipynb`     | `scripts/run_threshold_calibration.py`       | F1 sweep + logistic + bootstrap CI → `mt_calibration_result.json`                                             |
-| `05_langgraph_agents_v3.ipynb`        | _(library only — `src/agents/`)_              | Defines the 4-agent LangGraph pipeline used by the cache builder + Gradio app                                  |
-| `06_demo_preparation_v2.ipynb`        | `scripts/build_demo_cache.py`                | Build `data/cache/demo/{pipeline_cache,portfolio_screen,spacy_results,llm_results}.json`                      |
+| Notebook                              | Unified subcommand           | Backward-compat script                       | What it does                                                                                                  |
+| ------------------------------------- | ---------------------------- | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `01_data_retrieval_v2.ipynb`          | `python -m src data`         | `scripts/run_data_retrieval.py`              | Pull CRSP / Compustat / IBES / FF / CIQ from WRDS into `data/raw/`                                            |
+| `02_spacy_baseline_v2.ipynb`          | `python -m src baseline`     | `scripts/run_spacy_baseline.py`              | spaCy targets + Moving Targets baseline → `spacy_targets.parquet`, `spacy_mt_scores.parquet`                  |
+| `03_llm_extraction_v2.ipynb`          | `python -m src llm`          | `scripts/run_llm_extraction.py`              | LLM target extraction (Gemini / OpenAI) → `llm_targets.parquet` (+ optional `llm_targets.jsonl` resumable flow) |
+| `04_rag_matching_v4.ipynb`            | `python -m src rag`          | `scripts/run_rag_matching.py`                | Semantic MT via ChromaDB + sentence-transformers → `semantic_mt_scores.parquet`, `per_pair_sims.parquet`      |
+| `04b_threshold_calibration.ipynb`     | `python -m src calibrate`    | `scripts/run_threshold_calibration.py`       | F1 sweep + logistic + bootstrap CI → `mt_calibration_result.json`                                             |
+| `05_langgraph_agents_v3.ipynb`        | _(library only — `src/agents/`)_                                                  |                                              | Defines the 4-agent LangGraph pipeline used by the cache builder + Gradio app                                  |
+| `06_demo_preparation_v2.ipynb`        | `python -m src cache`        | `scripts/build_demo_cache.py`                | Build `data/cache/demo/{pipeline_cache,portfolio_screen,spacy_results,llm_results}.json`                      |
 
 The notebooks are kept for narrative + diagnostic plots, but everything
-they materialise is now produced by these scripts. Run them in sequence
-with the orchestrator:
+they materialise is produced by the subcommands above. Run them in
+sequence with the orchestrator (`pipeline` subcommand):
 
 ```bash
-python scripts/run_pipeline.py                          # everything end-to-end
-python scripts/run_pipeline.py --start rag              # reuse llm_targets.parquet
-python scripts/run_pipeline.py --skip data llm          # reuse upstream parquets
-python scripts/run_pipeline.py --dry-run                # print the plan only
+python -m src pipeline                          # everything end-to-end
+python -m src pipeline --start rag              # reuse llm_targets.parquet
+python -m src pipeline --skip data llm          # reuse upstream parquets
+python -m src pipeline --dry-run                # print the plan only
 ```
 
 Each stage runs as a separate subprocess so a failure in one stage does
-not poison the next.
+not poison the next. Use `python -m src status` at any point to see
+which artifacts are on disk.
 
 ### What you need before running each stage
 

@@ -1,36 +1,18 @@
 """
-app.py — EarningsLens Gradio Web Demo (patched).
+demo/app.py — EarningsLens Gradio web application.
 
-Two-tab Gradio interface:
-    Tab 1 — Company Analysis
-        Analyse a single company/quarter: load pre-computed pipeline result
-        from cache (or run live via the LangGraph structured path), display
-        targets, dropped target table, risk narrative, spaCy vs LLM
-        comparison, and risk score gauge.
+Launch with the single top-level entry point::
 
-    Tab 2 — Portfolio Screen
-        Show the highest MT-score companies for a selected quarter, ranked
-        by LLM signal. Click a row to drill into the full report.
+    python app.py
 
-Patches in this revision
-------------------------
-1. Fixed all over-escaped regexes (single-backslash sequences inside raw strings).
-2. Fixed literal "\n" newlines in errors_md.
-3. Live-fallback structured loader now handles fiscalyear+fiscalquarter
-   (matches CIQ parquet schema).
-4. Tab 2 trusts portfolio_screen.json when present (canonical NB08 output)
-   and only rebuilds from in-memory cache as a fallback.
-5. _discover_cache scans cache root + pipeline_cache.json only. per_quarter/
-   is intentionally ignored: the demo is a microscope on the 12 curated NB08
-   pairs, not the full S&P 200 fan-out.
-6. Risk colour/label maps cover 'unknown' and 'N/A'.
-7. Env-var-driven LLM config (EARNINGSLENS_LLM_*), structured-path live
-   fallback, no emojis, _unavailable_result instead of fabricated numbers.
+Three tabs:
 
-Usage
------
-    python demo/app.py            # launch on http://localhost:7860
-    python demo/app.py --share    # create public link
+    Workflow          — run every pipeline stage inside the browser
+    Company Analysis  — per-ticker / per-quarter report
+    Portfolio Screen  — ranked portfolio view
+
+Users download data manually, place it under ``data/raw/``, then run stages
+from the Workflow tab. No separate CLI is required.
 """
 
 from __future__ import annotations
@@ -174,8 +156,8 @@ def _discover_cache() -> Tuple[List[str], List[str], Dict[str, Dict[str, Any]]]:
     _CACHE_IS_EMPTY = not cache_map
     if _CACHE_IS_EMPTY:
         logger.warning(
-            "No demo cache found under %s. Run scripts/build_demo_cache.py "
-            "to materialise pipeline_cache.json and portfolio_screen.json.",
+            "No demo cache found under %s. Use the Workflow tab to run the "
+            "cache stage after upstream parquets are ready.",
             _CACHE_DIR,
         )
 
@@ -776,19 +758,14 @@ def load_portfolio(quarter_display: str) -> Tuple[pd.DataFrame, str]:
 
 
 # ===========================================================================
-# Tab 3 — Pipeline control
+# Workflow — in-app pipeline control (no CLI)
 # ===========================================================================
-# The Pipeline tab lets you run every stage from the web UI itself. Each
-# stage shells out to ``python -m src <subcommand>`` so the CLI and UI take
-# exactly the same code path; the only difference is that the UI tees stdout
-# and stderr into a Textbox in near-real time.
 
-import subprocess
-import shlex
+from demo.pipeline_runner import WORKFLOW_STAGES, run_stage_streaming
 
 
 def _refresh_status_markdown() -> str:
-    """Render the current pipeline-state table for the Pipeline tab."""
+    """Render the current pipeline-state table for the Workflow tab."""
     try:
         from src.status import describe_pipeline_status
         text = describe_pipeline_status(_PROJECT_ROOT / "data")
@@ -797,60 +774,74 @@ def _refresh_status_markdown() -> str:
     return f"```\n{text}\n```"
 
 
-_PIPELINE_STAGES = [
-    ("data",      "WRDS data retrieval (NB01)",        ""),
-    ("baseline",  "spaCy baseline + MT (NB02)",        "--limit 20"),
-    ("llm",       "LLM target extraction (NB03)",      "--limit 5"),
-    ("rag",       "Semantic MT batch (NB04)",          ""),
-    ("calibrate", "Threshold calibration (NB04b)",     ""),
-    ("cache",     "Build Gradio demo cache (NB06)",    ""),
-    ("pipeline",  "Run every stage in order",          "--dry-run"),
-]
-
-
-def _run_stage_streaming(subcommand: str, extra_args: str):
-    """
-    Run ``python -m src <subcommand> <extra_args>`` and yield combined
-    stdout/stderr lines for the Gradio Textbox.
-
-    Yields snapshots of the full log so far so Gradio can stream updates
-    into the read-only Textbox without flicker.
-    """
-    if not subcommand:
-        yield "Select a stage first."
-        return
-
-    cmd: List[str] = [sys.executable, "-m", "src", subcommand]
-    try:
-        cmd.extend(shlex.split(extra_args or ""))
-    except ValueError as exc:
-        yield f"Could not parse extra args: {exc}"
-        return
-
-    header = f"$ {' '.join(shlex.quote(c) for c in cmd)}\n\n"
-    yield header
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=str(_PROJECT_ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+def _cache_banner_markdown() -> str:
+    if _CACHE_IS_EMPTY:
+        return (
+            "> **No analysis cache yet.** Place your downloaded files under "
+            "`data/raw/`, then open the **Workflow** tab and run the pipeline "
+            "stages (or click **Run all**). Results will appear here automatically."
         )
-    except OSError as exc:
-        yield header + f"\nFailed to start subprocess: {exc}\n"
-        return
+    return ""
 
-    accumulated = header
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        accumulated += line
-        yield accumulated
-    proc.wait()
-    accumulated += f"\n[exit code {proc.returncode}]\n"
-    yield accumulated
+
+def _workflow_intro_markdown() -> str:
+    from demo.bootstrap import ensure_ready
+
+    lines = ensure_ready(_PROJECT_ROOT)
+    setup = "\n".join(f"- {line}" for line in lines) if lines else "- Environment ready."
+    return f"""
+### Workflow
+
+1. **Download data manually** and place files under `data/raw/` (at minimum
+   `ciq_transcripts.parquet` or `transcripts.parquet`, plus any other parquets
+   you use for evaluation).
+2. **Run stages below** — everything happens inside this app; no terminal commands.
+3. Open **Company Analysis** or **Portfolio Screen** once the cache stage finishes.
+
+{setup}
+"""
+
+
+def _reload_cache_choices():
+    """Re-read cache from disk and return dropdown updates for the UI."""
+    global _DISCOVERED_TICKERS, _DISCOVERED_QUARTERS, _IN_MEMORY_CACHE, _CACHE_IS_EMPTY
+    global _TICKERS, _QUARTERS, _QUARTERS_DISPLAY, _QUARTER_MAP
+
+    tickers, quarters, cache = _discover_cache()
+    _DISCOVERED_TICKERS = tickers
+    _DISCOVERED_QUARTERS = quarters
+    _IN_MEMORY_CACHE = cache
+
+    _TICKERS = tickers or _DEFAULT_TICKERS
+    _QUARTERS = quarters or _DEFAULT_QUARTERS
+    _QUARTERS_DISPLAY = [f"Q{q[5]} {q[:4]}" for q in _QUARTERS]
+    _QUARTER_MAP = {disp: raw for disp, raw in zip(_QUARTERS_DISPLAY, _QUARTERS)}
+
+    default_ticker = "AAPL" if "AAPL" in _TICKERS else (_TICKERS[0] if _TICKERS else None)
+    default_quarter_disp = _QUARTERS_DISPLAY[-1] if _QUARTERS_DISPLAY else None
+
+    banner_update = (
+        gr.update(value="", visible=False)
+        if not _CACHE_IS_EMPTY
+        else gr.update(value=_cache_banner_markdown(), visible=True)
+    )
+
+    return (
+        gr.update(choices=_TICKERS, value=default_ticker),
+        gr.update(choices=_QUARTERS_DISPLAY, value=default_quarter_disp),
+        gr.update(choices=_QUARTERS_DISPLAY, value=default_quarter_disp),
+        _refresh_status_markdown(),
+        banner_update,
+    )
+
+
+def _run_workflow_stage(stage: str, extra_args: str, api_key: str):
+    """Generator wrapper used by the Workflow tab Run button."""
+    yield from run_stage_streaming(stage, extra_args, api_key=api_key or "")
+
+
+def _run_all_stages(extra_args: str, api_key: str):
+    yield from _run_workflow_stage("all", extra_args, api_key)
 
 
 def drill_down_report(portfolio_df: pd.DataFrame, evt: gr.SelectData) -> str:
@@ -1099,27 +1090,74 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
         )
 
         if _CACHE_IS_EMPTY:
+            cache_banner = gr.Markdown(_cache_banner_markdown())
+        else:
+            cache_banner = gr.Markdown(visible=False)
+
+        # ---------------------------------------------------------------
+        # Tab 1 — Workflow (run everything inside the app)
+        # ---------------------------------------------------------------
+        with gr.Tab("Workflow", id="workflow"):
+            workflow_intro = gr.Markdown(_workflow_intro_markdown())
+
             gr.Markdown(
                 """
-> **Demo cache not built yet.** No pre-computed pipeline output was found
-> under `data/cache/demo/`. The dropdowns above are populated from the
-> default ticker grid but every analysis will return "no data". To
-> materialise the real cache, open the **Pipeline** tab and click through
-> each stage, or run the unified CLI:
->
-> ```bash
-> python -m src pipeline      # run every stage end-to-end
-> python -m src cache         # rebuild only the cache stage
-> python -m src status        # see which artifacts exist on disk
-> ```
->
-> See `README.md` -> *Notebook-free pipeline* for the full mapping of
-> notebooks to subcommands.
+**Expected manual downloads** (place under `data/raw/`):
+
+- `ciq_transcripts.parquet` — earnings call transcripts (required for baseline / LLM)
+- `mt_calibration_sample_labeled.csv` — human-labeled pairs (place under `data/processed/` for calibration)
 """
             )
 
+            api_key_tb = gr.Textbox(
+                label="LLM API key (optional)",
+                placeholder="Paste OpenAI / Gemini key for LLM extraction and cache build",
+                type="password",
+                info="Stored only for the current browser session; used by LLM and cache stages.",
+            )
+
+            with gr.Row():
+                with gr.Column(scale=1):
+                    stage_dd = gr.Dropdown(
+                        choices=[s[0] for s in WORKFLOW_STAGES],
+                        value=WORKFLOW_STAGES[0][0],
+                        label="Stage",
+                    )
+                with gr.Column(scale=2):
+                    extra_args_tb = gr.Textbox(
+                        value="",
+                        label="Extra options",
+                        info="Optional flags, e.g. `--limit 50` or `--pairs AAPL=2023Q4`",
+                    )
+                with gr.Column(scale=1):
+                    run_stage_btn = gr.Button("Run stage", variant="primary")
+                    run_all_btn = gr.Button("Run all", variant="secondary")
+                    refresh_status_btn = gr.Button("Refresh status")
+
+            gr.Markdown(
+                "\n".join(
+                    f"- **{sid}** — {label}"
+                    + (f" _(suggested: `{extras}`)_" if extras else "")
+                    for sid, label, extras in WORKFLOW_STAGES
+                )
+            )
+
+            status_md = gr.Markdown(_refresh_status_markdown())
+            log_box = gr.Textbox(
+                value="",
+                label="Stage output",
+                lines=22,
+                interactive=False,
+            )
+
+            refresh_status_btn.click(
+                fn=_refresh_status_markdown,
+                inputs=None,
+                outputs=[status_md],
+            )
+
         # ---------------------------------------------------------------
-        # Tab 1 — Company Analysis
+        # Tab 2 — Company Analysis
         # ---------------------------------------------------------------
         with gr.Tab("Company Analysis"):
             with gr.Row():
@@ -1257,76 +1295,32 @@ LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
                 outputs=[drill_down_md],
             )
 
-        # ---------------------------------------------------------------
-        # Tab 3 — Pipeline control
-        # ---------------------------------------------------------------
-        with gr.Tab("Pipeline"):
-            gr.Markdown(
-                """
-### Run pipeline stages from the web UI
-
-Every button below calls `python -m src <subcommand>` — the same code path
-as the `earningslens` command line. Output streams into the log panel.
-Stages with external dependencies (WRDS, an LLM API key, ChromaDB)
-require those to be configured; click the corresponding stage anyway to
-see the exact error message in the log.
-"""
-            )
-
-            with gr.Row():
-                with gr.Column(scale=1):
-                    stage_dd = gr.Dropdown(
-                        choices=[s[0] for s in _PIPELINE_STAGES],
-                        value=_PIPELINE_STAGES[0][0],
-                        label="Stage",
-                        info="Which pipeline subcommand to run",
-                    )
-                with gr.Column(scale=2):
-                    extra_args_tb = gr.Textbox(
-                        value="",
-                        label="Extra args",
-                        info=(
-                            "Forwarded to the subcommand verbatim, e.g. "
-                            "`--limit 50` or `--start rag`."
-                        ),
-                    )
-                with gr.Column(scale=1):
-                    run_stage_btn = gr.Button("Run stage", variant="primary")
-                    refresh_status_btn = gr.Button("Refresh status")
-
-            gr.Markdown(
-                "\n".join(
-                    f"- **`{name}`** — {desc} (suggested extras: `{extras or 'none'}`)"
-                    for name, desc, extras in _PIPELINE_STAGES
-                )
-            )
-
-            status_md = gr.Markdown(_refresh_status_markdown(), label="Status")
-
-            # NOTE: ``show_copy_button`` was removed from gr.Textbox in
-            # Gradio 6.x. Avoid it so the tab loads on both 5.x and 6.x.
-            log_box = gr.Textbox(
-                value="",
-                label="Stage output",
-                lines=22,
-                interactive=False,
-            )
-
-            run_stage_btn.click(
-                fn=_run_stage_streaming,
-                inputs=[stage_dd, extra_args_tb],
-                outputs=[log_box],
-            )
-            run_stage_btn.click(
-                fn=_refresh_status_markdown,
-                inputs=None,
-                outputs=[status_md],
-            )
-            refresh_status_btn.click(
-                fn=_refresh_status_markdown,
-                inputs=None,
-                outputs=[status_md],
-            )
+        # Refresh analysis tabs after a workflow stage completes.
+        _workflow_refresh_outputs = [
+            ticker_dd,
+            quarter_dd,
+            portfolio_quarter_dd,
+            status_md,
+            cache_banner,
+        ]
+        run_stage_btn.click(
+            fn=_run_workflow_stage,
+            inputs=[stage_dd, extra_args_tb, api_key_tb],
+            outputs=[log_box],
+        ).then(
+            fn=_reload_cache_choices,
+            inputs=None,
+            outputs=_workflow_refresh_outputs,
+        )
+        run_all_btn.click(
+            fn=_run_all_stages,
+            inputs=[extra_args_tb, api_key_tb],
+            outputs=[log_box],
+        ).then(
+            fn=_reload_cache_choices,
+            inputs=None,
+            outputs=_workflow_refresh_outputs,
+        )
 
         gr.Markdown(
             """

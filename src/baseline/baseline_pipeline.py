@@ -58,7 +58,21 @@ logger = logging.getLogger("earningslens.baseline.pipeline")
 # ---------------------------------------------------------------------------
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]  # repository root
-DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "transcripts.parquet"
+DEFAULT_RAW_DIR = DEFAULT_ROOT / "data" / "raw"
+
+
+def resolve_default_raw_path(raw_dir: Optional[Path] = None) -> Path:
+    """Pick the first transcripts parquet present under ``data/raw/``."""
+    raw_dir = raw_dir or DEFAULT_RAW_DIR
+    for name in ("ciq_transcripts.parquet", "transcripts.parquet"):
+        candidate = raw_dir / name
+        if candidate.exists():
+            return candidate
+    # Fall back to the legacy filename so error messages stay predictable.
+    return raw_dir / "transcripts.parquet"
+
+
+DEFAULT_RAW = resolve_default_raw_path()
 DEFAULT_TARGETS_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_targets.parquet"
 DEFAULT_MT_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_mt_scores.parquet"
 

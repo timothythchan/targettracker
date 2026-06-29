@@ -1,33 +1,28 @@
 #!/usr/bin/env python3
-"""Top-level entry point for the EarningsLens app.
+"""Launch the EarningsLens web app.
 
-This is the shortest path to launching the web UI:
+This is the only command you need::
 
     python app.py
-    python app.py --host 0.0.0.0 --port 7860
-    python app.py --share
 
-It is a thin wrapper around the unified ``earningslens`` CLI's ``app``
-subcommand, which itself wraps ``demo.cli.main``. For the full set of
-pipeline subcommands, use::
-
-    python -m src --help
-    python -m src status
-    python -m src baseline --limit 20
-    python -m src cache
-    python -m src app --port 7860
-
-If no demo cache exists under ``data/cache/demo/``, the app still
-launches but shows a "Demo cache not built yet" banner with the
-subcommand to run::
-
-    python -m src cache         # NB06 port
-    python -m src pipeline      # full pipeline, end to end
+On first launch the app installs any missing Python packages, downloads the
+spaCy language model, creates the ``data/`` folder layout, and opens the
+Gradio UI. Place your manually downloaded files under ``data/raw/``, then
+run each pipeline stage from the **Workflow** tab inside the browser.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from demo.bootstrap import ensure_ready
+
+ensure_ready(_ROOT)
 
 from demo.cli import main
 

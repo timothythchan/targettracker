@@ -129,6 +129,15 @@ class PipelineState(TypedDict, total=False):
     component_type: int
 
     # -----------------------------------------------------------------------
+    # Extractor agent input (optional fast-path)
+    # -----------------------------------------------------------------------
+    # When set, the Extractor agent skips the live LLM call and uses these
+    # already-extracted targets directly. This is how scripts/build_demo_cache.py
+    # (port of NB06) avoids re-paying for LLM tokens when llm_targets.parquet is
+    # already on disk from NB03 / scripts/run_llm_extraction.py.
+    pre_extracted_targets: List[Dict[str, Any]]
+
+    # -----------------------------------------------------------------------
     # Extractor agent output
     # -----------------------------------------------------------------------
     extracted_targets: List[Dict[str, Any]]

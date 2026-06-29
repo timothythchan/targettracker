@@ -1,133 +1,74 @@
 # Moving Targets LM / EarningsLens
 
-This repository contains a scriptable replication and LLM extension of the
-"Moving Targets" earnings-call target extraction workflow. The original work is
-still documented in `docs/` and exploratory notebooks remain in `notebooks/`,
-but the runnable path is now normal Python modules and scripts.
+Research replication of the "Moving Targets" earnings-call target extraction
+workflow. Original notebooks remain in `notebooks/` for reference; the
+runnable path is a single web app.
 
-## Can this run without Google Colab?
-
-Yes. The core pipeline can run on any machine with Python 3.10+:
-
-1. WRDS data retrieval writes raw parquet files under `data/raw/`.
-2. The spaCy baseline reads `data/raw/transcripts.parquet` and writes baseline
-   targets and Moving Targets scores under `data/processed/`.
-3. The LLM extractor reads the same transcript data and writes LLM targets under
-   `data/processed/`.
-4. The Gradio demo can be launched locally from Python.
-
-Google Colab is only useful for optional GPU-heavy QLoRA fine-tuning. It is not
-required for data retrieval, baseline extraction, hosted-API LLM extraction, RAG,
-evaluation, or the demo.
-
-## Local setup
+## Quick start
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r requirements.txt
-python -m pip install -e .
-python -m spacy download en_core_web_lg
+python app.py
 ```
 
-For OpenAI-backed LLM extraction:
+That is the only command you need. On first launch the app:
+
+- installs any missing Python packages
+- downloads the spaCy language model (`en_core_web_sm`)
+- creates the `data/` folder layout
+- opens the Gradio UI at http://localhost:7860
+
+## Workflow inside the app
+
+1. **Download data manually** and place files under `data/raw/` (at minimum
+   `ciq_transcripts.parquet`).
+2. Open the **Workflow** tab in the browser.
+3. Run stages in order (or click **Run all**):
+   - baseline — spaCy targets + Moving Targets (NB02)
+   - llm — LLM extraction (NB03, needs API key pasted in the app)
+   - rag — semantic MT batch (NB04)
+   - calibrate — threshold calibration (NB04b, needs labeled CSV in `data/processed/`)
+   - cache — build analysis cache for the UI (NB06)
+4. View results in **Company Analysis** and **Portfolio Screen**.
+
+No terminal commands are required after `python app.py`. The optional
+`python -m src` CLI still exists for automation, but the app is the
+primary interface.
+
+## App tabs
+
+| Tab | Purpose |
+|-----|---------|
+| **Workflow** | Run every pipeline stage, view status and logs |
+| **Company Analysis** | Per-ticker targets, risk gauge, spaCy vs LLM comparison |
+| **Portfolio Screen** | Ranked portfolio view for a quarter |
+
+## Expected data files
+
+Place manually downloaded files here:
+
+| Path | Purpose |
+|------|---------|
+| `data/raw/ciq_transcripts.parquet` | Earnings call transcripts (required) |
+| `data/processed/mt_calibration_sample_labeled.csv` | Human-labeled pairs for calibration (optional) |
+
+The app writes intermediate outputs to `data/processed/` and the UI cache to
+`data/cache/demo/`.
+
+## Docker
 
 ```bash
-export OPENAI_API_KEY="..."
+make docker-build
+make docker-run    # http://localhost:7860
 ```
 
-For WRDS retrieval, configure WRDS credentials as you normally would (for
-example `~/.pgpass`) or pass `--wrds-user`.
+## Advanced: CLI (optional)
 
-## Notebook-free commands
-
-### 1. Pull data from WRDS
+For scripting and CI, the same stages are available via `python -m src`:
 
 ```bash
-python scripts/run_data_retrieval.py \
-  --wrds-user YOUR_WRDS_USERNAME \
-  --output-dir data/raw
+python -m src status
+python -m src baseline --limit 20
+python -m src cache
 ```
 
-Equivalent installed console command:
-
-```bash
-earningslens-data --wrds-user YOUR_WRDS_USERNAME --output-dir data/raw
-```
-
-### 2. Run the spaCy baseline
-
-```bash
-python scripts/run_spacy_baseline.py \
-  --input data/raw/transcripts.parquet \
-```
-
-### 3. Run LLM extraction
-
-Smoke test on a small subset:
-
-```bash
-python scripts/run_llm_extraction.py \
-  --backend openai \
-  --model gpt-4o-mini \
-  --input data/raw/transcripts.parquet \
-  --output-dir data/processed \
-  --limit 10
-```
-
-Full run:
-
-```bash
-python scripts/run_llm_extraction.py \
-  --backend openai \
-  --model gpt-4o-mini \
-  --input data/raw/transcripts.parquet \
-  --output-dir data/processed \
-  --max-concurrent 10
-```
-
-This writes `data/processed/llm_targets.parquet` and
-`data/processed/llm_extraction_summary.json`.
-
-Equivalent installed console command:
-
-```bash
-earningslens-llm --backend openai --model gpt-4o-mini --input data/raw/transcripts.parquet --output-dir data/processed --limit 10
-```
-
-### 4. Launch the local demo
-
-```bash
-python scripts/run_demo.py --host 127.0.0.1 --port 7860
-```
-
-Equivalent installed console command:
-
-```bash
-earningslens-demo --host 127.0.0.1 --port 7860
-```
-
-## Transcript input expectations
-
-The baseline pipeline expects a parquet file with at least:
-
-- `companyid`
-- `fiscalyear`
-- `fiscalquarter`
-- `component_type`
-- `text`
-
-The LLM pipeline accepts either:
-
-- a directory containing `transcripts.parquet` or `ciq_transcripts.parquet`,
-- a direct parquet file path via `--input`, or
-- a directory of JSON transcript documents.
-
-For parquet inputs, the loaders accept both notebook-style columns (`transcript_id`, `text`, `component_type`) and the WRDS CIQ retrieval output (`transcriptid`, `componenttext`, `component_type_id`, `year`, `quarter`). If no transcript ID exists, the LLM loader creates transcript groups from available company-quarter columns.
-
-## Repository hygiene
-
-Generated data, caches, virtual environments, and bytecode are ignored by
-`.gitignore`. Keep large parquet files in local storage or shared drives rather
-than committing them.
+See `notebooks/` and `docs/` for the original Colab workflow and methodology.

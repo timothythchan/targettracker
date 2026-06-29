@@ -58,7 +58,21 @@ logger = logging.getLogger("earningslens.baseline.pipeline")
 # ---------------------------------------------------------------------------
 
 DEFAULT_ROOT = Path(__file__).resolve().parents[2]  # repository root
-DEFAULT_RAW = DEFAULT_ROOT / "data" / "raw" / "transcripts.parquet"
+DEFAULT_RAW_DIR = DEFAULT_ROOT / "data" / "raw"
+
+
+def resolve_default_raw_path(raw_dir: Optional[Path] = None) -> Path:
+    """Pick the first transcripts parquet present under ``data/raw/``."""
+    raw_dir = raw_dir or DEFAULT_RAW_DIR
+    for name in ("ciq_transcripts.parquet", "transcripts.parquet"):
+        candidate = raw_dir / name
+        if candidate.exists():
+            return candidate
+    # Fall back to the legacy filename so error messages stay predictable.
+    return raw_dir / "transcripts.parquet"
+
+
+DEFAULT_RAW = resolve_default_raw_path()
 DEFAULT_TARGETS_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_targets.parquet"
 DEFAULT_MT_OUT = DEFAULT_ROOT / "data" / "processed" / "spacy_mt_scores.parquet"
 
@@ -92,12 +106,17 @@ class BaselinePipeline:
 
     def __init__(
         self,
-        spacy_model: str = "en_core_web_lg",
+        # NB02 Cell 6 loads ``en_core_web_sm``. ``en_core_web_lg`` produces
+        # noticeably different NER counts on the same transcript corpus, so
+        # the script default tracks the notebook to keep MT scores
+        # reproducible. Pass ``--spacy-model en_core_web_lg`` to opt in.
+        spacy_model: str = "en_core_web_sm",
         compute_persistence: bool = True,
         persistence_window: int = 12,
         raw_path: Optional[Path] = None,
         targets_out: Optional[Path] = None,
         mt_out: Optional[Path] = None,
+        limit: int = 0,
     ) -> None:
         self.spacy_model = spacy_model
         self.compute_persistence = compute_persistence
@@ -106,6 +125,9 @@ class BaselinePipeline:
         self.raw_path = Path(raw_path) if raw_path else DEFAULT_RAW
         self.targets_out = Path(targets_out) if targets_out else DEFAULT_TARGETS_OUT
         self.mt_out = Path(mt_out) if mt_out else DEFAULT_MT_OUT
+        # NB02 ``N_FULL`` cap: when > 0, cap the run to the first N
+        # ``(companyid, fiscalyear, fiscalquarter)`` groups for smoke tests.
+        self.limit = max(0, int(limit))
 
         # Lazy-initialised in run()
         self._extractor: Optional[Any] = None
@@ -267,8 +289,47 @@ class BaselinePipeline:
             ``(targets_df, target_sets)`` where ``target_sets`` is keyed
             by ``(company_id, quarter_key)``.
         """
+        # Cap the run for smoke tests / dev iteration. Mirrors NB02 Cell 27's
+        # ``N_FULL`` knob, which slices the first N unique ``transcriptid``
+        # values in first-appearance order. When ``transcriptid`` is present
+        # we follow that exactly; otherwise (notebook-style input without a
+        # transcript ID column) fall back to the first N
+        # ``(companyid, fiscalyear, fiscalquarter)`` groups in encounter order.
+        if self.limit > 0:
+            if "transcriptid" in raw_df.columns:
+                ordered_tids = raw_df["transcriptid"].drop_duplicates().tolist()
+                keep_tids = set(ordered_tids[: self.limit])
+                if len(ordered_tids) > self.limit:
+                    raw_df = raw_df[raw_df["transcriptid"].isin(keep_tids)].copy()
+                    logger.info(
+                        "Limit applied: %d / %d transcriptids retained (limit=%d).",
+                        len(keep_tids), len(ordered_tids), self.limit,
+                    )
+            else:
+                groups_preview = raw_df.groupby(
+                    ["companyid", "fiscalyear", "fiscalquarter"], sort=False
+                )
+                if len(groups_preview) > self.limit:
+                    keep_keys = set(
+                        k for k, _ in list(groups_preview)[: self.limit]
+                    )
+                    mask = list(zip(
+                        raw_df["companyid"],
+                        raw_df["fiscalyear"],
+                        raw_df["fiscalquarter"],
+                    ))
+                    raw_df = raw_df[[t in keep_keys for t in mask]].copy()
+                    logger.info(
+                        "Limit applied: %d / %d groups retained "
+                        "(limit=%d, fallback path; transcriptid column missing).",
+                        len(keep_keys),
+                        sum(1 for _ in groups_preview),
+                        self.limit,
+                    )
+
         groups = raw_df.groupby(["companyid", "fiscalyear", "fiscalquarter"])
         n_groups = len(groups)
+
         logger.info("Extracting targets from %d (company, quarter) groups …", n_groups)
 
         all_target_rows: List[Dict] = []
@@ -432,16 +493,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=None,
-        help=(
-            "Directory for default output files. If supplied and --targets-out/"
-            "--mt-out are not supplied, writes spacy_targets.parquet and "
-            "spacy_mt_scores.parquet inside this directory."
-        ),
-    )
-    parser.add_argument(
         "--targets-out",
         type=Path,
         default=DEFAULT_TARGETS_OUT,
@@ -455,8 +506,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--spacy-model",
-        default="en_core_web_lg",
-        help="spaCy model name (default: en_core_web_lg)",
+        default="en_core_web_sm",
+        help=(
+            "spaCy model name (default: en_core_web_sm, matches NB02 Cell 6). "
+            "Pass en_core_web_lg for higher recall at the cost of a different "
+            "MT panel."
+        ),
     )
     parser.add_argument(
         "--no-persistence",
@@ -468,6 +523,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=12,
         help="Number of prior quarters to test persistence over (default: 12).",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=0,
+        help=(
+            "Optional cap on the number of (companyid, fiscalyear, fiscalquarter) "
+            "groups processed (default: 0 = process all). Mirrors NB02 N_FULL."
+        ),
     )
     parser.add_argument(
         "--log-level",
@@ -509,6 +573,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         raw_path=args.raw_path,
         targets_out=targets_out,
         mt_out=mt_out,
+        limit=args.limit,
     )
 
     try:

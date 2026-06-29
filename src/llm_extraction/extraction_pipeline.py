@@ -46,34 +46,47 @@ class PipelineConfig:
     """
     Configuration for the LLM extraction pipeline.
 
-    Attributes
-    ----------
-    data_dir       : str  — root data directory (expects data_dir/raw/ and
-                            data_dir/processed/ sub-dirs)
-    backend        : str  — "openai" or "local"
-    model          : str  — model identifier for chosen backend
-    api_key        : str  — OpenAI API key (overrides env var)
-    base_url       : str  — base URL for local vLLM/Ollama server
-    max_concurrent : int  — max simultaneous LLM requests
-    max_tokens     : int  — per-request token budget
-    temperature    : float— sampling temperature (0 = deterministic)
-    spacy_baseline_path : str — path to spaCy baseline parquet for comparison
-    output_filename     : str — output parquet filename under data_dir/processed/
-    log_level      : str  — Python logging level name
+    Most fields map 1:1 to ``LLMTargetExtractor.__init__`` parameters and
+    expose the knobs that NB03 v2 actually used in production. Anything not
+    listed here was hard-coded in the notebook driver cells; if you find
+    yourself patching ``run_pipeline`` to pass a new kwarg, add it here so
+    the CLI stays consistent.
     """
+
     data_dir: str = "data"
     backend: str = "openai"
     model: str = "gpt-4o-mini"
     api_key: str = ""
-    base_url: str = "http://localhost:8000/v1"
+    # Default base_url is empty so the SDK uses its own default
+    # (api.openai.com for ``backend="openai"``). Pass --base-url to override.
+    # The previous default of ``http://localhost:8000/v1`` poisoned every
+    # Gemini / OpenAI run because the wiring below always forwarded a non-
+    # empty value to ``LLMTargetExtractor``.
+    base_url: str = ""
+
+    # Async / rate-limit knobs (NB03 Cell 27 default values)
     max_concurrent: int = 10
-    max_tokens: int = 2048
+    max_completion_tokens: int = 2048
+    max_input_tokens_per_chunk: int = 12_000
+    request_timeout_s: float = 120.0
+    max_retries: int = 6
+    rpm_cap: Optional[int] = 600
+    tpm_cap: int = 2_000_000
+
     temperature: float = 0.0
+
     spacy_baseline_path: str = ""
     output_filename: str = "llm_targets.parquet"
     raw_input_path: str = ""
     processed_output_dir: str = ""
     limit: int = 0
+
+    # Resumable JSONL-first flow (NB03 Cell 42). When True, run
+    # ``extract_corpus_to_jsonl`` writing to ``output_filename`` with .jsonl
+    # extension first, then flatten to parquet via :func:`save_results_from_jsonl`.
+    use_jsonl_flow: bool = False
+    jsonl_filename: str = "llm_targets.jsonl"
+
     log_level: str = "INFO"
     extra: Dict[str, Any] = field(default_factory=dict)
 
@@ -92,10 +105,25 @@ def _find_transcript_parquet(raw_path: Path) -> Optional[Path]:
 
 
 def _normalize_transcript_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
-    """Normalize notebook and WRDS CIQ transcript schemas for LLM loading."""
+    """Normalize notebook and WRDS CIQ transcript schemas for LLM loading.
+
+    Output schema after normalization:
+
+        - ``transcript_id`` : ``f"{company_id}_{YYYY}Q{N}"`` (NB03 Cell 6
+          canonical form). The leading company id keeps any ``.0`` suffix
+          pandas added when companyid was stored as a float — downstream
+          :func:`parse_transcript_id` strips it via ``split('.')[0]``.
+        - ``text``           : component text.
+        - ``component_type`` : CIQ component_type_id (2=Presentation,
+          3=Analyst Question, 4=Management Answer; 1=Press Release dropped
+          to match NB03 Cell 5).
+        - ``componentorder`` : preserved when present, for stable sorting.
+    """
+    import pandas as pd
+
     df = df.copy()
     rename_map = {
-        "transcriptid": "transcript_id",
+        "transcriptid": "transcript_id_raw",   # do NOT clobber a real transcript_id
         "componenttext": "text",
         "component_type_id": "component_type",
     }
@@ -103,19 +131,57 @@ def _normalize_transcript_dataframe(df: "pd.DataFrame") -> "pd.DataFrame":
         if target not in df.columns and source in df.columns:
             df = df.rename(columns={source: target})
 
-    if "transcript_id" not in df.columns:
-        group_cols = [
-            c for c in ["companyid", "fiscalyear", "fiscalquarter", "year", "quarter"]
-            if c in df.columns
-        ]
-        if group_cols:
-            df["transcript_id"] = df[group_cols].astype(str).agg("_".join, axis=1)
-        else:
-            df["transcript_id"] = df.index.astype(str)
-    if "component_type" not in df.columns:
-        df["component_type"] = 0
     if "text" not in df.columns:
         raise ValueError("Parquet transcript input must contain text or componenttext")
+
+    # Derive fiscalyear / fiscalquarter when the CIQ retrieval output only
+    # has 'quarter' (YYYYQN string) or only an event_date.
+    if "fiscalyear" not in df.columns and "year" in df.columns:
+        df["fiscalyear"] = df["year"]
+    if "fiscalquarter" not in df.columns and "quarter" in df.columns:
+        parsed = (
+            df["quarter"].astype(str).str.extract(r"(?:^|.*Q)([1-4])$", expand=False)
+        )
+        df["fiscalquarter"] = pd.to_numeric(parsed, errors="coerce").astype("Int64")
+    if (
+        ("fiscalyear" not in df.columns or "fiscalquarter" not in df.columns)
+        and "event_date" in df.columns
+    ):
+        ed = pd.to_datetime(df["event_date"], errors="coerce")
+        if "fiscalyear" not in df.columns:
+            df["fiscalyear"] = ed.dt.year
+        if "fiscalquarter" not in df.columns:
+            df["fiscalquarter"] = ed.dt.quarter
+
+    # Component-type filter to match NB03 Cell 5 (keep 2 / 3 / 4 only).
+    if "component_type" in df.columns:
+        ctype_num = pd.to_numeric(df["component_type"], errors="coerce")
+        df = df[ctype_num.isin([2, 3, 4])].copy()
+    else:
+        df["component_type"] = 0
+
+    # Build canonical transcript_id ``{company_id}_{YYYY}Q{N}``. Falls back
+    # to the raw ``transcriptid`` integer / a synthesized id only when the
+    # canonical fields are missing.
+    if (
+        "companyid" in df.columns
+        and "fiscalyear" in df.columns
+        and "fiscalquarter" in df.columns
+    ):
+        cid = df["companyid"].astype(str)
+        fy = df["fiscalyear"].astype("Int64").astype(str)
+        fq = df["fiscalquarter"].astype("Int64").astype(str)
+        df["transcript_id"] = cid + "_" + fy + "Q" + fq
+    elif "transcript_id" in df.columns:
+        df["transcript_id"] = df["transcript_id"].astype(str)
+    elif "transcript_id_raw" in df.columns:
+        df["transcript_id"] = df["transcript_id_raw"].astype(str)
+    else:
+        df["transcript_id"] = df.index.astype(str)
+
+    # Preserve componentorder if present so groupby keeps call order.
+    if "componentorder" in df.columns:
+        df = df.sort_values(["transcript_id", "componentorder"])
     return df
 
 
@@ -160,10 +226,24 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
 
         df = pd.read_parquet(parquet_file)
         df = _normalize_transcript_dataframe(df)
-        grouped = df.groupby("transcript_id")
+        grouped = df.groupby("transcript_id", sort=False)
         for tid, group in grouped:
             components = group[["text", "component_type"]].to_dict("records")
-            transcripts.append({"transcript_id": str(tid), "components": components})
+            # NB03 Cell 6: emit top-level company_id + quarter so
+            # extract_corpus_to_jsonl can stamp them on every JSONL line
+            # without re-parsing transcript_id later.
+            head = group.iloc[0]
+            doc: Dict[str, Any] = {"transcript_id": str(tid), "components": components}
+            if "companyid" in group.columns:
+                doc["company_id"] = str(head["companyid"])
+            if "fiscalyear" in group.columns and "fiscalquarter" in group.columns:
+                try:
+                    fy = int(head["fiscalyear"])
+                    fq = int(head["fiscalquarter"])
+                    doc["quarter"] = f"{fy}Q{fq}"
+                except (TypeError, ValueError):
+                    pass
+            transcripts.append(doc)
         logger.info("load_transcripts | loaded %d transcripts from parquet", len(transcripts))
         return transcripts
 
@@ -202,12 +282,96 @@ def load_transcripts(raw_dir: str) -> List[Dict]:
 # Results saver
 # ---------------------------------------------------------------------------
 
+import re
+
+# Match NB03's transcript_id format: "{company_id}_{YYYY}Q{N}" or
+# "{company_id}.0_{YYYY}Q{N}" (the .0 suffix shows up because pandas casts
+# numeric companyids through float at JSONL flatten time).
+_TRANSCRIPT_ID_RE = re.compile(
+    r"^(?P<company_id>\d+(?:\.\d+)?)_(?P<fiscalyear>\d{4})Q(?P<fiscalquarter>[1-4])$"
+)
+
+
+def parse_transcript_id(transcript_id: str) -> Dict[str, Any]:
+    """
+    Split an NB03 transcript_id into ``company_id``, ``fiscalyear``,
+    ``fiscalquarter``, and ``quarter`` (``YYYYQN``).
+
+    Returns a dict with all four keys, with ``None`` values when parsing
+    fails so the caller can still write the row.
+
+    >>> parse_transcript_id("18711.0_2023Q4") == {
+    ...     "company_id": "18711", "fiscalyear": 2023,
+    ...     "fiscalquarter": 4, "quarter": "2023Q4",
+    ... }
+    True
+    >>> parse_transcript_id("free-form-id")
+    {'company_id': 'free-form-id', 'fiscalyear': None, 'fiscalquarter': None, 'quarter': ''}
+    """
+    if not transcript_id:
+        return {"company_id": "", "fiscalyear": None, "fiscalquarter": None, "quarter": ""}
+
+    m = _TRANSCRIPT_ID_RE.match(str(transcript_id))
+    if not m:
+        return {
+            "company_id": str(transcript_id),
+            "fiscalyear": None,
+            "fiscalquarter": None,
+            "quarter": "",
+        }
+
+    cid_raw = m.group("company_id")
+    # Split on '.' so companyids ending in 0 (like IBM's 112350) keep their
+    # trailing zeros — the previous str.rstrip('.0') heuristic had a known
+    # truncation bug, see NB06 Cell 5.
+    company_id = cid_raw.split(".")[0]
+    fiscalyear = int(m.group("fiscalyear"))
+    fiscalquarter = int(m.group("fiscalquarter"))
+    return {
+        "company_id": company_id,
+        "fiscalyear": fiscalyear,
+        "fiscalquarter": fiscalquarter,
+        "quarter": f"{fiscalyear}Q{fiscalquarter}",
+    }
+
+
+def _load_results_from_jsonl(jsonl_path: str) -> Dict[str, List[Dict[str, Any]]]:
+    """Load an ``llm_targets.jsonl`` file into the in-memory results dict."""
+    results: Dict[str, List[Dict[str, Any]]] = {}
+    path = Path(jsonl_path)
+    if not path.exists():
+        logger.warning("JSONL output missing at %s", path)
+        return results
+
+    with open(path) as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                logger.warning("Skipping malformed JSONL line: %s", exc)
+                continue
+            tid = rec.get("transcript_id")
+            if not tid:
+                continue
+            results[tid] = list(rec.get("targets") or [])
+    return results
+
+
 def save_results(
     results: Dict[str, List[Dict]],
     output_path: str,
 ) -> int:
     """
     Flatten extraction results and save to Parquet.
+
+    Each output row carries the original target fields plus the
+    ``transcript_id`` and the parsed metadata columns (``company_id``,
+    ``fiscalyear``, ``fiscalquarter``, ``quarter``) so downstream scripts
+    do not have to re-parse the ID. Numeric ``numerical_value`` is also
+    coerced to float — NB03 Cell 43.
 
     Parameters
     ----------
@@ -225,20 +389,92 @@ def save_results(
 
     rows = []
     for transcript_id, targets in results.items():
+        meta = parse_transcript_id(transcript_id)
         for target in targets:
-            row = {"transcript_id": transcript_id, **target}
-            rows.append(row)
+            rows.append({
+                "transcript_id": transcript_id,
+                **meta,
+                **target,
+            })
 
     if not rows:
         logger.warning("save_results | no targets to save — writing empty file")
         df = pd.DataFrame(columns=["transcript_id"])
     else:
         df = pd.DataFrame(rows)
+        if "fiscalyear" in df.columns:
+            df["fiscalyear"] = df["fiscalyear"].astype("Int64")
+        if "fiscalquarter" in df.columns:
+            df["fiscalquarter"] = df["fiscalquarter"].astype("Int64")
+        if "numerical_value" in df.columns:
+            df["numerical_value"] = pd.to_numeric(
+                df["numerical_value"], errors="coerce"
+            )
+        # Drop the Unicode-garbage columns that earlier prompt corruption
+        # leaked in (NB06 Cell 5 + Cell 12 both strip these). Keeps
+        # llm_targets.parquet schema-clean even when the JSONL has noise.
+        garbage = [c for c in df.columns
+                   if isinstance(c, str)
+                   and c.startswith("temporal_")
+                   and c != "temporal_framing"]
+        if garbage:
+            df = df.drop(columns=garbage)
+            logger.info("save_results | dropped %d garbage temporal_* columns: %s",
+                        len(garbage), garbage)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     df.to_parquet(output_path, index=False)
     logger.info("save_results | saved %d rows to %s", len(df), output_path)
     return len(df)
+
+
+def repair_parquet_from_jsonl(
+    jsonl_path: str,
+    parquet_path: str,
+    *,
+    backup_suffix: str = "_buggy_company_id",
+) -> Dict[str, int]:
+    """
+    Rebuild ``llm_targets.parquet`` from the canonical JSONL.
+
+    Mirrors NB06 Cell 5: the original NB03 parquet writer used
+    ``str.rstrip('.0')``, which silently truncated company IDs ending in
+    zero (e.g. IBM ``112350`` → ``11235``). This helper reads the JSONL
+    (source of truth), parses ``transcript_id`` correctly via
+    :func:`parse_transcript_id`, and overwrites the parquet — keeping a
+    backup of the previous file so nothing is lost.
+
+    Returns
+    -------
+    Dict[str, int]
+        ``{"rows": N, "transcripts": K, "companies_old": .., "companies_new": ..}``
+    """
+    try:
+        import pandas as pd  # noqa: F401  (only used through save_results)
+    except ImportError as exc:
+        raise ImportError("pandas required: pip install pandas pyarrow") from exc
+
+    jsonl_p = Path(jsonl_path)
+    parquet_p = Path(parquet_path)
+    if not jsonl_p.exists():
+        raise FileNotFoundError(
+            f"JSONL source-of-truth missing: {jsonl_p}. "
+            "Cannot repair parquet without the raw rows."
+        )
+
+    if parquet_p.exists():
+        backup = parquet_p.with_name(parquet_p.stem + backup_suffix + parquet_p.suffix)
+        if not backup.exists():
+            import shutil
+            shutil.copy2(parquet_p, backup)
+            logger.info("Backed up buggy parquet -> %s", backup)
+
+    results = _load_results_from_jsonl(str(jsonl_p))
+    n_rows = save_results(results, str(parquet_p))
+    return {
+        "rows": n_rows,
+        "transcripts": len(results),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -417,29 +653,69 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         return {}
 
     # ── Build extractor ────────────────────────────────────────────────────
+    # NB03 v2 knobs are exposed 1:1 as kwargs. The previous version of
+    # this code passed ``max_tokens_per_request``, which is NOT a parameter
+    # accepted by ``LLMTargetExtractor.__init__`` — the value was silently
+    # dropped and the per-request token budget always defaulted. Bug fixed.
     extractor_kwargs: Dict[str, Any] = {
         "backend": config.backend,
         "model": config.model,
-        "max_tokens_per_request": config.max_tokens,
+        "max_concurrent": config.max_concurrent,
+        "max_completion_tokens": config.max_completion_tokens,
+        "max_input_tokens_per_chunk": config.max_input_tokens_per_chunk,
+        "request_timeout_s": config.request_timeout_s,
+        "max_retries": config.max_retries,
+        "rpm_cap": config.rpm_cap,
+        "tpm_cap": config.tpm_cap,
         "temperature": config.temperature,
     }
     if config.api_key:
         extractor_kwargs["api_key"] = config.api_key
-    if config.backend == "local":
+    # Forward base_url ONLY when explicitly set, so the SDK default
+    # (api.openai.com for openai backend, server config for local) wins
+    # otherwise. Local-only backends still need a base_url; require the
+    # caller to pass --base-url for them.
+    if config.base_url:
         extractor_kwargs["base_url"] = config.base_url
 
     logger.info("run_pipeline | initialising LLMTargetExtractor (backend=%s) …", config.backend)
     extractor = LLMTargetExtractor(**extractor_kwargs)
 
+    # ── Resolve output paths ───────────────────────────────────────────────
+    processed_dir = (
+        Path(config.processed_output_dir)
+        if config.processed_output_dir
+        else Path(config.data_dir) / "processed"
+    )
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    output_path = str(processed_dir / config.output_filename)
+    jsonl_path = str(processed_dir / config.jsonl_filename)
+
     # ── Run async extraction ───────────────────────────────────────────────
     logger.info(
-        "run_pipeline | starting extraction | %d transcripts | max_concurrent=%d",
-        len(transcripts), config.max_concurrent,
+        "run_pipeline | starting extraction | %d transcripts | max_concurrent=%d | jsonl_flow=%s",
+        len(transcripts), config.max_concurrent, config.use_jsonl_flow,
     )
     t_extract = time.monotonic()
-    results = await extractor.extract_corpus(
-        transcripts, max_concurrent=config.max_concurrent
-    )
+
+    if config.use_jsonl_flow:
+        # Resumable production path (NB03 Cell 42). Writes one line per
+        # transcript as it completes, so a Ctrl-C / 503 mid-run does not
+        # lose work — the next launch skips finished transcript_ids.
+        # NOTE: extract_corpus_to_jsonl accepts the parameter as ``out_path``;
+        # passing ``output_path=`` raises TypeError (the audit flagged this).
+        await extractor.extract_corpus_to_jsonl(
+            transcripts,
+            out_path=jsonl_path,
+            max_concurrent=config.max_concurrent,
+        )
+        results: Dict[str, List[Dict[str, Any]]] = _load_results_from_jsonl(jsonl_path)
+    else:
+        # In-memory path (suitable for short interactive runs).
+        results = await extractor.extract_corpus(
+            transcripts, max_concurrent=config.max_concurrent
+        )
+
     elapsed_extract = time.monotonic() - t_extract
     logger.info(
         "run_pipeline | extraction complete in %.2fs | %d transcripts processed",
@@ -447,8 +723,6 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     )
 
     # ── Save results ───────────────────────────────────────────────────────
-    processed_dir = Path(config.processed_output_dir) if config.processed_output_dir else Path(config.data_dir) / "processed"
-    output_path = str(processed_dir / config.output_filename)
     n_saved = save_results(results, output_path)
 
     # ── Compare with spaCy baseline ────────────────────────────────────────
@@ -532,8 +806,13 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--base-url",
-        default="http://localhost:8000/v1",
-        help="Base URL for local vLLM/Ollama server",
+        default="",
+        help=(
+            "Override the SDK base URL. Required for local vLLM/Ollama (e.g. "
+            "http://localhost:8000/v1) and useful for Gemini's OpenAI-compatible "
+            "endpoint (https://generativelanguage.googleapis.com/v1beta/openai/). "
+            "Default empty = use the SDK's own default (api.openai.com)."
+        ),
     )
     p.add_argument(
         "--data-dir",
@@ -561,9 +840,50 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--max-tokens",
+        "--max-completion-tokens",
+        dest="max_completion_tokens",
         type=int,
         default=2048,
-        help="Per-request token budget (default: 2048)",
+        help="Per-request completion token budget (default: 2048)",
+    )
+    p.add_argument(
+        "--max-input-tokens-per-chunk",
+        type=int,
+        default=12_000,
+        help="Cap on the input-token count per LLM chunk (default: 12000, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--request-timeout-s",
+        type=float,
+        default=120.0,
+        help="Per-request timeout in seconds (default: 120, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--max-retries",
+        type=int,
+        default=6,
+        help="Async retry budget for transient errors (default: 6)",
+    )
+    p.add_argument(
+        "--rpm-cap",
+        type=int,
+        default=600,
+        help="Requests-per-minute cap (default: 600, NB03 v2 setting)",
+    )
+    p.add_argument(
+        "--tpm-cap",
+        type=int,
+        default=2_000_000,
+        help="Tokens-per-minute cap (default: 2_000_000)",
+    )
+    p.add_argument(
+        "--use-jsonl-flow",
+        action="store_true",
+        help=(
+            "Use the resumable JSONL-first flow (NB03 Cell 42). "
+            "Each transcript's targets are appended to llm_targets.jsonl as "
+            "they finish, so a Ctrl-C / 503 mid-run does not lose work."
+        ),
     )
     p.add_argument(
         "--temperature",
@@ -613,13 +933,19 @@ def main(argv: Optional[List[str]] = None) -> int:
         api_key=args.api_key,
         base_url=args.base_url,
         max_concurrent=args.max_concurrent,
-        max_tokens=args.max_tokens,
+        max_completion_tokens=args.max_completion_tokens,
+        max_input_tokens_per_chunk=args.max_input_tokens_per_chunk,
+        request_timeout_s=args.request_timeout_s,
+        max_retries=args.max_retries,
+        rpm_cap=args.rpm_cap,
+        tpm_cap=args.tpm_cap,
         temperature=args.temperature,
         spacy_baseline_path=args.spacy_baseline,
         output_filename=args.output,
         raw_input_path=args.raw_input_path,
         processed_output_dir=args.output_dir,
         limit=args.limit,
+        use_jsonl_flow=args.use_jsonl_flow,
         log_level=args.log_level,
     )
 

@@ -55,5 +55,5 @@ notes below are the non-obvious bits.
 - CLI mirror of the app for automation: `python -m src status`,
   `python -m src baseline --raw-path data/raw/ciq_transcripts.parquet`,
   `python -m src cache`, etc.
-- Docker build/run targets exist (`make docker-build` / `make docker-run`) but are not
-  needed for normal dev.
+- There is no Docker support (the `Dockerfile`/`make docker-*` targets were removed);
+  run the app directly with `python app.py`.

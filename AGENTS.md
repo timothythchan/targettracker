@@ -2,9 +2,11 @@
 
 ## Cursor Cloud specific instructions
 
-EarningsLens / Moving Targets LM is a single Python product: a Gradio web app that
-extracts forward-looking "targets" from earnings-call transcripts (spaCy baseline +
-Moving Targets scoring, optional LLM/RAG/LangGraph stages). There is **no separate
+Target Tracker (a.k.a. EarningsLens / Moving Targets LM) is a single Python product: a
+Gradio web app that extracts forward-looking "targets" from earnings-call transcripts
+(spaCy baseline + Moving Targets scoring, optional LLM/RAG/LangGraph stages). The UI is
+an institutional dashboard with tabs **Overview, Data, Pipeline, Entity Report,
+Watchlist** (built from `demo/interface.py` + `demo/theme.py`). There is **no separate
 backend, database, or queue** — ChromaDB is embedded and WRDS/LLM providers are
 remote and optional. Standard commands live in `README.md` and the `Makefile`; the
 notes below are the non-obvious bits.
@@ -36,15 +38,15 @@ notes below are the non-obvious bits.
   extraction still works).
 
 ### Which stages need secrets
-- **baseline** stage (Workflow tab → "Run stage") runs the full spaCy extraction +
+- **baseline** stage (Pipeline tab → "Run stage") runs the full spaCy extraction +
   Moving Targets entirely offline — no API key. This is the easiest end-to-end check.
-- **llm**, **cache**, and the LangGraph **agents**/Company-Analysis live path need an
+- **llm**, **cache**, and the LangGraph **agents**/Entity-Report live path need an
   LLM key via env (`EARNINGSLENS_LLM_API_KEY`, falling back to `GOOGLE_API_KEY` /
   `GEMINI_API_KEY` / `OPENAI_API_KEY`) or pasted into the app's "LLM API key" field.
   The `cache` stage also expects the curated CIQ demo universe (AAPL, MSFT, NVDA,
   META, GOOGL, T) and the full CIQ schema, so it will not run on arbitrary
   synthetic tickers.
-- The **Company Analysis** and **Portfolio Screen** tabs render from a prebuilt cache
+- The **Entity Report** and **Watchlist** tabs render from a prebuilt cache
   under `data/cache/demo/`. With no cache they fall back to the live LangGraph
   pipeline (LLM key required); otherwise they show "No data available".
 

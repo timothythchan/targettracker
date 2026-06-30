@@ -13,7 +13,7 @@ The Gradio app at ``demo/app.py`` reads three files from
 
 Historically these were materialised by Notebook 08 in Colab. This script
 reproduces every cell of NB06 (Cells 5, 7, 8, 10, 12, 13, 18) so the cache
-can be built from the command line, in CI, or inside a Docker container.
+can be built from the command line or via the app's Workflow tab.
 
 Required inputs
 ---------------

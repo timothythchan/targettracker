@@ -54,13 +54,6 @@ Place manually downloaded files here:
 The app writes intermediate outputs to `data/processed/` and the UI cache to
 `data/cache/demo/`.
 
-## Docker
-
-```bash
-make docker-build
-make docker-run    # http://localhost:7860
-```
-
 ## Advanced: CLI (optional)
 
 For scripting and CI, the same stages are available via `python -m src`:

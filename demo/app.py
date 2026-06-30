@@ -1,18 +1,20 @@
 """
-demo/app.py — EarningsLens Gradio web application.
+demo/app.py — Target Tracker Gradio application handlers.
 
 Launch with the single top-level entry point::
 
     python app.py
 
-Three tabs:
+Tabs (assembled in ``demo/interface.py``):
 
-    Workflow          — run every pipeline stage inside the browser
-    Company Analysis  — per-ticker / per-quarter report
-    Portfolio Screen  — ranked portfolio view
+    Overview        — KPI dashboard and quick start
+    Data            — corpus upload and file checklist
+    Pipeline        — in-browser stage execution
+    Entity Report   — per-entity / per-quarter analysis
+    Watchlist       — ranked MT-risk screen
 
 Users download data manually, place it under ``data/raw/``, then run stages
-from the Workflow tab. No separate CLI is required.
+from the Pipeline tab. No separate CLI is required.
 """
 
 from __future__ import annotations
@@ -156,7 +158,7 @@ def _discover_cache() -> Tuple[List[str], List[str], Dict[str, Dict[str, Any]]]:
     _CACHE_IS_EMPTY = not cache_map
     if _CACHE_IS_EMPTY:
         logger.warning(
-            "No demo cache found under %s. Use the Workflow tab to run the "
+            "No demo cache found under %s. Use the Pipeline tab to run the "
             "cache stage after upstream parquets are ready.",
             _CACHE_DIR,
         )
@@ -166,21 +168,22 @@ def _discover_cache() -> Tuple[List[str], List[str], Dict[str, Dict[str, Any]]]:
 
 _DISCOVERED_TICKERS, _DISCOVERED_QUARTERS, _IN_MEMORY_CACHE = _discover_cache()
 
-# Fallback grids if cache hasn't been built yet
-_DEFAULT_TICKERS = sorted([
-    "AAPL", "MSFT", "AMZN", "GOOGL", "META", "NVDA", "TSLA", "AVGO", "ORCL",
-    "CSCO", "ACN", "TXN", "QCOM", "INTC", "AMD", "IBM", "CRM", "ADBE",
-    "JPM", "BAC", "GS", "MS", "BLK", "SCHW", "V", "MA",
-    "JNJ", "UNH", "LLY", "MRK", "ABBV", "TMO", "DHR", "BMY", "GILD", "AMGN",
-    "WMT", "HD", "DIS", "NFLX", "COST", "PG", "PEP", "KO", "MDLZ", "SBUX",
-    "CVX", "XOM", "NEE", "SO", "T",
-])
-_DEFAULT_QUARTERS = [f"{y}Q{q}" for y in range(2020, 2024) for q in range(1, 5)]
+# Only show entities/quarters from cache or raw corpus — never a synthetic grid.
+_TICKERS: List[str] = list(_DISCOVERED_TICKERS)
+_QUARTERS: List[str] = list(_DISCOVERED_QUARTERS)
+if not _TICKERS or not _QUARTERS:
+    try:
+        from demo.data_manager import scan_raw_universe
+        _scan = scan_raw_universe(_PROJECT_ROOT / "data")
+        if _scan:
+            if not _TICKERS:
+                _TICKERS = list(_scan[0])
+            if not _QUARTERS:
+                _QUARTERS = list(_scan[1])
+    except Exception:
+        pass
 
-_TICKERS = _DISCOVERED_TICKERS or _DEFAULT_TICKERS
-_QUARTERS = _DISCOVERED_QUARTERS or _DEFAULT_QUARTERS
-
-_QUARTERS_DISPLAY = [f"Q{q[5]} {q[:4]}" for q in _QUARTERS]
+_QUARTERS_DISPLAY = [f"Q{q[5]} {q[:4]}" for q in _QUARTERS] if _QUARTERS else []
 _QUARTER_MAP = {disp: raw for disp, raw in zip(_QUARTERS_DISPLAY, _QUARTERS)}
 
 logger.info(
@@ -749,8 +752,8 @@ def load_portfolio(quarter_display: str) -> Tuple[pd.DataFrame, str]:
     df = _get_portfolio_data(quarter)
     if df.empty:
         status = (
-            f"No portfolio data available for **{quarter_display}**. "
-            "Run NB08 pre-computation to populate the demo cache."
+            f"No watchlist data for **{quarter_display}**. "
+            "Run the **cache** stage on Pipeline after upstream steps complete."
         )
     else:
         status = f"Showing top {len(df)} companies by LLM MT score for **{quarter_display}**."
@@ -777,9 +780,9 @@ def _refresh_status_markdown() -> str:
 def _cache_banner_markdown() -> str:
     if _CACHE_IS_EMPTY:
         return (
-            "> **No analysis cache yet.** Place your downloaded files under "
-            "`data/raw/`, then open the **Workflow** tab and run the pipeline "
-            "stages (or click **Run all**). Results will appear here automatically."
+            "> **No analysis cache yet.** Upload corpus files on **Data**, then run "
+            "pipeline stages on **Pipeline** (or click **Run all**). Results appear "
+            "on **Entity Report** and **Watchlist** automatically."
         )
     return ""
 
@@ -812,12 +815,23 @@ def _reload_cache_choices():
     _DISCOVERED_QUARTERS = quarters
     _IN_MEMORY_CACHE = cache
 
-    _TICKERS = tickers or _DEFAULT_TICKERS
-    _QUARTERS = quarters or _DEFAULT_QUARTERS
+    _TICKERS = tickers or _TICKERS
+    _QUARTERS = quarters or _QUARTERS
+    if not _TICKERS or not _QUARTERS:
+        try:
+            from demo.data_manager import scan_raw_universe
+            _scan = scan_raw_universe(_PROJECT_ROOT / "data")
+            if _scan:
+                if not _TICKERS:
+                    _TICKERS = list(_scan[0])
+                if not _QUARTERS:
+                    _QUARTERS = list(_scan[1])
+        except Exception:
+            pass
     _QUARTERS_DISPLAY = [f"Q{q[5]} {q[:4]}" for q in _QUARTERS]
     _QUARTER_MAP = {disp: raw for disp, raw in zip(_QUARTERS_DISPLAY, _QUARTERS)}
 
-    default_ticker = "AAPL" if "AAPL" in _TICKERS else (_TICKERS[0] if _TICKERS else None)
+    default_ticker = _TICKERS[0] if _TICKERS else None
     default_quarter_disp = _QUARTERS_DISPLAY[-1] if _QUARTERS_DISPLAY else None
 
     banner_update = (
@@ -867,469 +881,89 @@ def drill_down_report(portfolio_df: pd.DataFrame, evt: gr.SelectData) -> str:
 | **Targets Dropped** | {n_dropped} |
 | **Risk Flag** | <span style="color:{colour}">**{risk_flag}**</span> |
 
-*Switch to the Company Analysis tab and select this ticker for the full report.*
+*Open the **Entity Report** tab and select this entity for the full analysis.*
 """
     except Exception as exc:
         return f"*Could not load drill-down: {exc}*"
 
 
 # ===========================================================================
+# Overview dashboard
+# ===========================================================================
+
+def _overview_stats() -> Dict[str, Any]:
+    """Collect KPI numbers for the Overview tab."""
+    from demo.data_manager import _transcripts_ready
+
+    data_dir = _PROJECT_ROOT / "data"
+    pipeline_stage = "Not started"
+    pipeline_detail = "awaiting corpus"
+    try:
+        from src.status import describe_pipeline_status
+        status_text = describe_pipeline_status(data_dir)
+        first_line = status_text.strip().split("\n")[0] if status_text else ""
+        if first_line:
+            pipeline_stage = first_line[:40]
+            pipeline_detail = "see Pipeline tab"
+    except Exception:
+        pass
+
+    if _transcripts_ready(data_dir) and _CACHE_IS_EMPTY:
+        pipeline_detail = "corpus ready — run pipeline"
+
+    status_message = ""
+    if _CACHE_IS_EMPTY:
+        if not _transcripts_ready(data_dir):
+            status_message = (
+                "Upload a transcript parquet on the Data tab to begin. "
+                "No synthetic demo data is shown."
+            )
+        else:
+            status_message = (
+                "Corpus detected. Run pipeline stages (baseline → llm → rag → "
+                "calibrate → cache) to populate analysis results."
+            )
+
+    return {
+        "n_tickers": len(_TICKERS),
+        "n_quarters": len(_QUARTERS),
+        "cache_pairs": len(_IN_MEMORY_CACHE),
+        "data_ready": _transcripts_ready(data_dir),
+        "pipeline_stage": pipeline_stage,
+        "pipeline_detail": pipeline_detail,
+        "status_message": status_message,
+    }
+
+
+def render_overview_html() -> str:
+    """Render the Overview tab HTML dashboard."""
+    from demo.data_manager import render_overview_dashboard
+
+    stats = _overview_stats()
+    quarter = _QUARTERS[-1] if _QUARTERS else ""
+    quarter_disp = _QUARTERS_DISPLAY[-1] if _QUARTERS_DISPLAY else "—"
+    rows: List[Dict[str, Any]] = []
+    if quarter:
+        df = _get_portfolio_data(quarter)
+        if not df.empty:
+            rows = df.to_dict(orient="records")
+
+    return render_overview_dashboard(
+        _PROJECT_ROOT / "data",
+        stats,
+        rows,
+        quarter_disp,
+    )
+
+
+# ===========================================================================
 # Gradio interface assembly
 # ===========================================================================
 
-def build_interface() -> gr.Blocks:
+def build_interface() -> "gr.Blocks":
     """Build and return the full Gradio Blocks interface."""
-    default_ticker = "AAPL" if "AAPL" in _TICKERS else (_TICKERS[0] if _TICKERS else "")
-    default_quarter_disp = _QUARTERS_DISPLAY[-1] if _QUARTERS_DISPLAY else ""
-
-    # Cream / light theme with serif-accented sans typography.
-    light_theme = gr.themes.Soft(
-        primary_hue=gr.themes.colors.stone,
-        secondary_hue=gr.themes.colors.amber,
-        neutral_hue=gr.themes.colors.stone,
-        # Gradio 5+ requires Font objects, not plain strings. CSS below handles
-        # system-font fallbacks across the whole container.
-        font=[gr.themes.GoogleFont("Inter")],
-        font_mono=[gr.themes.GoogleFont("JetBrains Mono")],
-    ).set(
-        body_background_fill="#faf6ef",
-        body_background_fill_dark="#faf6ef",
-        background_fill_primary="#fffaf2",
-        background_fill_primary_dark="#fffaf2",
-        background_fill_secondary="#f3ece0",
-        background_fill_secondary_dark="#f3ece0",
-        block_background_fill="#fffaf2",
-        block_background_fill_dark="#fffaf2",
-        block_border_color="#e6dcc7",
-        block_border_color_dark="#e6dcc7",
-        block_label_background_fill="#fffaf2",
-        block_label_background_fill_dark="#fffaf2",
-        block_title_text_color="#3a2f1f",
-        block_title_text_color_dark="#3a2f1f",
-        body_text_color="#2b2418",
-        body_text_color_dark="#2b2418",
-        body_text_color_subdued="#6b5e48",
-        body_text_color_subdued_dark="#6b5e48",
-        button_primary_background_fill="#7a5a2e",
-        button_primary_background_fill_dark="#7a5a2e",
-        button_primary_background_fill_hover="#8d6b3a",
-        button_primary_background_fill_hover_dark="#8d6b3a",
-        button_primary_text_color="#fffaf2",
-        button_primary_text_color_dark="#fffaf2",
-        input_background_fill="#fffaf2",
-        input_background_fill_dark="#fffaf2",
-        input_border_color="#d9cdb1",
-        input_border_color_dark="#d9cdb1",
-    )
-
-    # Center the entire app to ~1/3 page width and add generous spacing.
-    custom_css = """
-    /* Force light mode globally so Gradio's auto dark-mode CSS doesn't kick in */
-    :root, .dark, html, html.dark, body, body.dark {
-        --body-background-fill: #faf6ef !important;
-        color-scheme: light !important;
-        background: #faf6ef !important;
-    }
-    .gradio-container, .gradio-container.dark {
-        background: #faf6ef !important;
-        max-width: 760px !important;
-        margin: 0 auto !important;
-        padding: 32px 24px 48px 24px !important;
-    }
-    .gradio-container *, .gradio-container.dark * {
-        font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif !important;
-    }
-    h1, h2, h3, h4 {
-        letter-spacing: -0.01em;
-        color: #2b2418 !important;
-    }
-    h1 {
-        font-weight: 600 !important;
-        font-size: 2.1rem !important;
-        margin-bottom: 0.2em !important;
-    }
-    h3 {
-        font-weight: 500 !important;
-        color: #6b5e48 !important;
-    }
-    .prose, .markdown, .markdown p, .markdown li, p, li, span, label {
-        line-height: 1.7 !important;
-        color: #2b2418 !important;
-    }
-    /* Generous vertical rhythm between blocks */
-    .gradio-container > .gap, .gradio-container .form, .gradio-container .block {
-        margin-bottom: 18px !important;
-    }
-    /* Tab strip */
-    .tab-nav {
-        border-bottom: 1px solid #e6dcc7 !important;
-        padding-bottom: 4px !important;
-        background: transparent !important;
-    }
-    .tab-nav button {
-        color: #6b5e48 !important;
-        background: transparent !important;
-    }
-    .tab-nav button.selected {
-        color: #7a5a2e !important;
-        border-bottom: 2px solid #7a5a2e !important;
-        background: transparent !important;
-    }
-    /* DataFrame component — reach Gradio's nested wrappers AND empty state */
-    .gradio-container .gr-dataframe,
-    .gradio-container [class*="dataframe"],
-    .gradio-container .table-wrap,
-    .gradio-container [class*="table-wrap"],
-    .gradio-container [class*="virtual-table"],
-    .gradio-container .svelte-virtual-table-viewport {
-        background: #fffaf2 !important;
-        color: #2b2418 !important;
-        border: 1px solid #e6dcc7 !important;
-        border-radius: 8px !important;
-    }
-    /* The "cell-wrap" wrapper that gives empty headers their dark look */
-    .gradio-container .cell-wrap,
-    .gradio-container [class*="cell-wrap"],
-    .gradio-container .header,
-    .gradio-container [class*="header-cell"] {
-        background: #f3ece0 !important;
-        color: #3a2f1f !important;
-    }
-    .gradio-container table,
-    .gradio-container .gr-dataframe table {
-        background: #fffaf2 !important;
-        color: #2b2418 !important;
-        border-collapse: collapse !important;
-        width: 100% !important;
-    }
-    /* Force every header cell, however nested, to cream-on-dark-brown */
-    .gradio-container table thead,
-    .gradio-container table thead tr,
-    .gradio-container table th,
-    .gradio-container table th *,
-    .gradio-container .gr-dataframe thead th,
-    .gradio-container .gr-dataframe thead th *,
-    .gradio-container thead .cell-wrap,
-    .gradio-container thead [class*="cell-wrap"] {
-        background: #f3ece0 !important;
-        background-color: #f3ece0 !important;
-        color: #3a2f1f !important;
-        font-weight: 600 !important;
-        border-bottom: 1px solid #d9cdb1 !important;
-    }
-    .gradio-container table tbody tr,
-    .gradio-container table tbody td,
-    .gradio-container table tbody td *,
-    .gradio-container .gr-dataframe tbody td,
-    .gradio-container .gr-dataframe tbody tr {
-        background: #fffaf2 !important;
-        background-color: #fffaf2 !important;
-        color: #2b2418 !important;
-        border-bottom: 1px solid #f0e6d4 !important;
-    }
-    .gradio-container table tbody tr:nth-child(even),
-    .gradio-container table tbody tr:nth-child(even) td,
-    .gradio-container .gr-dataframe tbody tr:nth-child(even),
-    .gradio-container .gr-dataframe tbody tr:nth-child(even) td {
-        background: #faf3e6 !important;
-        background-color: #faf3e6 !important;
-    }
-    .gradio-container table tbody tr:hover,
-    .gradio-container table tbody tr:hover td,
-    .gradio-container .gr-dataframe tbody tr:hover {
-        background: #f3ece0 !important;
-        background-color: #f3ece0 !important;
-    }
-    /* Inputs / dropdowns */
-    .gradio-container input,
-    .gradio-container select,
-    .gradio-container textarea,
-    .gradio-container .wrap-inner {
-        background: #fffaf2 !important;
-        color: #2b2418 !important;
-        border: 1px solid #d9cdb1 !important;
-    }
-    /* Buttons */
-    button {
-        border-radius: 8px !important;
-    }
-    button.primary, button[variant="primary"] {
-        background: #7a5a2e !important;
-        color: #fffaf2 !important;
-        border: none !important;
-    }
-    button.primary:hover, button[variant="primary"]:hover {
-        background: #8d6b3a !important;
-    }
-    /* Footer divider */
-    hr {
-        border: none !important;
-        border-top: 1px solid #e6dcc7 !important;
-        margin: 28px 0 !important;
-    }
-    """
-
-    # NOTE: Gradio 6.0 will move theme/css onto launch(), but Gradio 5.x
-    # still applies them only when passed to Blocks(...). We pass them here
-    # and silence the deprecation warning at the entry point.
-    with gr.Blocks(
-        theme=light_theme,
-        css=custom_css,
-        title="EarningsLens — Moving Targets Analyser",
-    ) as demo:
-
-        gr.Markdown(
-            """
-# EarningsLens
-### Forward-Guidance Continuity Analysis for Earnings Calls
-
-LLM-enhanced extraction · ChromaDB semantic search · LangGraph agent pipeline.
-
----
-"""
-        )
-
-        if _CACHE_IS_EMPTY:
-            cache_banner = gr.Markdown(_cache_banner_markdown())
-        else:
-            cache_banner = gr.Markdown(visible=False)
-
-        # ---------------------------------------------------------------
-        # Tab 1 — Workflow (run everything inside the app)
-        # ---------------------------------------------------------------
-        with gr.Tab("Workflow", id="workflow"):
-            workflow_intro = gr.Markdown(_workflow_intro_markdown())
-
-            gr.Markdown(
-                """
-**Expected manual downloads** (place under `data/raw/`):
-
-- `ciq_transcripts.parquet` — earnings call transcripts (required for baseline / LLM)
-- `mt_calibration_sample_labeled.csv` — human-labeled pairs (place under `data/processed/` for calibration)
-"""
-            )
-
-            api_key_tb = gr.Textbox(
-                label="LLM API key (optional)",
-                placeholder="Paste OpenAI / Gemini key for LLM extraction and cache build",
-                type="password",
-                info="Stored only for the current browser session; used by LLM and cache stages.",
-            )
-
-            with gr.Row():
-                with gr.Column(scale=1):
-                    stage_dd = gr.Dropdown(
-                        choices=[s[0] for s in WORKFLOW_STAGES],
-                        value=WORKFLOW_STAGES[0][0],
-                        label="Stage",
-                    )
-                with gr.Column(scale=2):
-                    extra_args_tb = gr.Textbox(
-                        value="",
-                        label="Extra options",
-                        info="Optional flags, e.g. `--limit 50` or `--pairs AAPL=2023Q4`",
-                    )
-                with gr.Column(scale=1):
-                    run_stage_btn = gr.Button("Run stage", variant="primary")
-                    run_all_btn = gr.Button("Run all", variant="secondary")
-                    refresh_status_btn = gr.Button("Refresh status")
-
-            gr.Markdown(
-                "\n".join(
-                    f"- **{sid}** — {label}"
-                    + (f" _(suggested: `{extras}`)_" if extras else "")
-                    for sid, label, extras in WORKFLOW_STAGES
-                )
-            )
-
-            status_md = gr.Markdown(_refresh_status_markdown())
-            log_box = gr.Textbox(
-                value="",
-                label="Stage output",
-                lines=22,
-                interactive=False,
-            )
-
-            refresh_status_btn.click(
-                fn=_refresh_status_markdown,
-                inputs=None,
-                outputs=[status_md],
-            )
-
-        # ---------------------------------------------------------------
-        # Tab 2 — Company Analysis
-        # ---------------------------------------------------------------
-        with gr.Tab("Company Analysis"):
-            with gr.Row():
-                with gr.Column(scale=1):
-                    ticker_dd = gr.Dropdown(
-                        choices=_TICKERS,
-                        value=default_ticker,
-                        label="Ticker",
-                        info="Demo universe (cached pairs only)",
-                    )
-                with gr.Column(scale=1):
-                    quarter_dd = gr.Dropdown(
-                        choices=_QUARTERS_DISPLAY,
-                        value=default_quarter_disp,
-                        label="Fiscal Quarter",
-                        info="Quarters available in the demo cache",
-                    )
-                with gr.Column(scale=1):
-                    analyse_btn = gr.Button("Analyse", variant="primary", size="lg")
-
-            gauge_html = gr.HTML(label="Risk Score")
-            narrative_md = gr.Markdown(label="Risk Narrative")
-
-            gr.Markdown("### Current Quarter Targets")
-            current_targets_tbl = gr.DataFrame(
-                label="Extracted Targets",
-                headers=["Metric Name", "Type", "Context"],
-                interactive=False,
-                wrap=True,
-            )
-
-            gr.Markdown("### Dropped Targets")
-            gr.Markdown(
-                "*Targets present in prior quarters but absent this quarter. "
-                "Persistent drops (12+ quarters) carry the strongest signal.*"
-            )
-            dropped_targets_tbl = gr.DataFrame(
-                label="Dropped Targets",
-                headers=["Target Name", "Last Seen", "Type", "Persistence"],
-                interactive=False,
-                wrap=True,
-            )
-
-            gr.Markdown("### Extraction Comparison: spaCy Baseline vs. LLM")
-
-            gr.Markdown("**spaCy Baseline Extraction**")
-            spacy_tbl = gr.DataFrame(
-                label="spaCy Targets",
-                headers=["Metric Name", "Type", "Context"],
-                interactive=False,
-                wrap=True,
-            )
-
-            gr.Markdown("**LLM-Enhanced Extraction**")
-            llm_tbl = gr.DataFrame(
-                label="LLM Targets",
-                headers=["Metric Name", "Type", "Context"],
-                interactive=False,
-                wrap=True,
-            )
-
-            errors_md = gr.Markdown(label="Notices")
-
-            tab1_outputs = [
-                current_targets_tbl,
-                dropped_targets_tbl,
-                gauge_html,
-                spacy_tbl,
-                llm_tbl,
-                narrative_md,
-                errors_md,
-            ]
-
-            analyse_btn.click(
-                fn=analyse_company,
-                inputs=[ticker_dd, quarter_dd],
-                outputs=tab1_outputs,
-                show_progress=True,
-            )
-
-            # Auto-populate Tab 1 on page load so the demo opens with real
-            # data already on screen (avoids dark empty-state placeholders).
-            demo.load(
-                fn=analyse_company,
-                inputs=[ticker_dd, quarter_dd],
-                outputs=tab1_outputs,
-            )
-
-        # ---------------------------------------------------------------
-        # Tab 2 — Portfolio Screen
-        # ---------------------------------------------------------------
-        with gr.Tab("Portfolio Screen"):
-            with gr.Row():
-                with gr.Column(scale=2):
-                    portfolio_quarter_dd = gr.Dropdown(
-                        choices=_QUARTERS_DISPLAY,
-                        value=default_quarter_disp,
-                        label="Select Quarter",
-                        info="Show highest MT-score companies for this quarter",
-                    )
-                with gr.Column(scale=1):
-                    load_btn = gr.Button("Load Portfolio", variant="primary")
-
-            portfolio_status = gr.Markdown()
-
-            portfolio_tbl = gr.DataFrame(
-                label="Top Companies by LLM MT Score",
-                headers=[
-                    "rank", "ticker", "company_name",
-                    "mt_score_llm", "mt_score_spacy", "n_dropped", "risk_flag"
-                ],
-                interactive=False,
-                wrap=True,
-            )
-
-            gr.Markdown("*Click a row to see the company summary.*")
-            drill_down_md = gr.Markdown()
-
-            load_btn.click(
-                fn=load_portfolio,
-                inputs=[portfolio_quarter_dd],
-                outputs=[portfolio_tbl, portfolio_status],
-            )
-
-            # Auto-populate Tab 2 on page load too.
-            demo.load(
-                fn=load_portfolio,
-                inputs=[portfolio_quarter_dd],
-                outputs=[portfolio_tbl, portfolio_status],
-            )
-
-            portfolio_tbl.select(
-                fn=drill_down_report,
-                inputs=[portfolio_tbl],
-                outputs=[drill_down_md],
-            )
-
-        # Refresh analysis tabs after a workflow stage completes.
-        _workflow_refresh_outputs = [
-            ticker_dd,
-            quarter_dd,
-            portfolio_quarter_dd,
-            status_md,
-            cache_banner,
-        ]
-        run_stage_btn.click(
-            fn=_run_workflow_stage,
-            inputs=[stage_dd, extra_args_tb, api_key_tb],
-            outputs=[log_box],
-        ).then(
-            fn=_reload_cache_choices,
-            inputs=None,
-            outputs=_workflow_refresh_outputs,
-        )
-        run_all_btn.click(
-            fn=_run_all_stages,
-            inputs=[extra_args_tb, api_key_tb],
-            outputs=[log_box],
-        ).then(
-            fn=_reload_cache_choices,
-            inputs=None,
-            outputs=_workflow_refresh_outputs,
-        )
-
-        gr.Markdown(
-            """
----
-*EarningsLens — Research prototype. Not investment advice.*
-"""
-        )
-
-    return demo
+    from demo.interface import build_interface as _build
+    return _build()
 
 
 # ===========================================================================
@@ -1340,11 +974,14 @@ def main(argv=None) -> int:
     """Launch the local Gradio app from a normal Python process."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="Launch EarningsLens Gradio demo")
+    parser = argparse.ArgumentParser(description="Launch Target Tracker Gradio app")
     parser.add_argument("--share", action="store_true", help="Create public Gradio link")
     parser.add_argument("--port", type=int, default=7860, help="Port to listen on")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     args = parser.parse_args(argv)
+
+    from demo.interface import build_interface
+    from demo.theme import APP_CSS, build_theme
 
     demo = build_interface()
     demo.launch(
@@ -1352,6 +989,8 @@ def main(argv=None) -> int:
         server_port=args.port,
         share=args.share,
         show_error=True,
+        theme=build_theme(),
+        css=APP_CSS,
     )
     return 0
 

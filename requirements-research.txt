@@ -1,0 +1,15 @@
+# Research / CLI extras (not required for `python app.py`).
+# Install on top of requirements-app.txt when you need WRDS pulls,
+# spaCy baseline replication, or evaluation notebooks.
+
+-r requirements-app.txt
+
+# WRDS data retrieval (NB01)
+wrds>=3.2
+
+# spaCy baseline (NB02) — optional research replication
+spacy>=3.7
+
+# Evaluation (Fama-MacBeth, CARs, etc.)
+statsmodels>=0.14
+scipy>=1.11

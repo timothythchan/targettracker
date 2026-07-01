@@ -1,10 +1,9 @@
 """
-status.py — Inspect the EarningsLens data directory and report pipeline state.
+status.py — Inspect the Target Tracker data directory and report pipeline state.
 
-The pipeline writes a fixed set of artifacts under ``data/raw/``,
-``data/processed/``, and ``data/cache/demo/``. ``earningslens status``
-(and the Gradio "Pipeline" tab) calls :func:`describe_pipeline_status`
-to render a single readable summary covering all six stages.
+The pipeline writes artifacts under ``data/raw/``, ``data/processed/``, and
+``data/cache/demo/``. The Gradio Pipeline tab calls :func:`describe_pipeline_status`
+to render a readable summary of each stage.
 
 This is a read-only helper. It does not modify any files.
 """
@@ -158,7 +157,7 @@ def describe_pipeline_status(data_dir: Path) -> str:
     stages = collect_stage_statuses(data_dir)
 
     lines: List[str] = []
-    lines.append(f"EarningsLens pipeline status — data dir: {data_dir}")
+    lines.append(f"Target Tracker pipeline status — data dir: {data_dir}")
     lines.append("=" * 72)
     for stage in stages:
         lines.append(
@@ -172,9 +171,13 @@ def describe_pipeline_status(data_dir: Path) -> str:
         lines.append("")
     next_stage = _suggest_next_stage(stages)
     if next_stage is not None:
-        lines.append(f"Next stage to run: `{next_stage.cli_subcommand}`")
+        lines.append(
+            f"Next stage to run: **{next_stage.name}** "
+            f"({next_stage.description}) — use the Pipeline tab or "
+            f"`earningslens {next_stage.name}`."
+        )
     else:
-        lines.append("All stages have produced artifacts. Run `earningslens app` to launch the UI.")
+        lines.append("All stages have produced artifacts. Run `python app.py` to launch the UI.")
     return "\n".join(lines)
 
 

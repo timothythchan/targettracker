@@ -10,13 +10,9 @@ Graph topology
 
 Conditional edges
 -----------------
-After the extractor node, if ``extracted_targets`` is empty AND the extractor
-logged a fallback (indicating the LLM extractor failed and spaCy also returned
-nothing), the pipeline still proceeds to comparator — comparator will handle
-the empty targets gracefully by skipping similarity computation.
-
-This design avoids a hard failure path and enables the reporter to produce a
-minimal "insufficient data" report even when extraction fails completely.
+When extraction returns no targets, the pipeline still proceeds to the
+comparator, which handles empty input gracefully. The reporter can then
+produce a minimal "insufficient data" report instead of hard-failing.
 """
 
 from __future__ import annotations

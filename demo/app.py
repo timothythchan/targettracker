@@ -520,15 +520,7 @@ def _risk_gauge_html(risk_score: float, risk_flag: str) -> str:
 
 
 def _targets_to_df(targets: List[Dict[str, Any]]) -> pd.DataFrame:
-    """Convert a list of target dicts to a display DataFrame.
-
-    Supports three schemas:
-      - NB03 LLM (Gemini): metric_name, raw_text, numerical_value, unit,
-        temporal_framing, trend_direction, is_financial
-      - NB02 spaCy baseline: target_text, numeric_value, entity_label,
-        sentence, is_financial
-      - Legacy display: metric_name, context, target_type
-    """
+    """Convert extracted target dicts to a display DataFrame (LLM schema)."""
     if not targets:
         return pd.DataFrame(columns=["Metric Name", "Type", "Context"])
 
@@ -551,27 +543,22 @@ def _targets_to_df(targets: List[Dict[str, Any]]) -> pd.DataFrame:
 
     rows = []
     for t in targets:
-        # Metric name: try every known key.
         metric = (
             t.get("metric_name")
             or t.get("canonical_name")
-            or t.get("target_text")     # spaCy
             or t.get("metric")
             or t.get("text")
             or ""
         )
 
-        # Type: explicit field, else derive from is_financial.
         ttype = (
             t.get("target_type")
             or t.get("type")
             or ("financial" if t.get("is_financial") else "non-financial")
         )
 
-        # Context: build from richest available fields per schema.
         context_parts: List[str] = []
 
-        # LLM-style numeric: numerical_value + unit
         nv = t.get("numerical_value")
         unit = t.get("unit") or ""
         if nv is not None:
@@ -586,31 +573,18 @@ def _targets_to_df(targets: List[Dict[str, Any]]) -> pd.DataFrame:
                 else:
                     context_parts.append(val)
 
-        # spaCy-style: numeric_value is already a string like "$89.5 billion"
-        nv_str = t.get("numeric_value")
-        if not nv and nv_str:
-            context_parts.append(str(nv_str))
-
-        # Direction (LLM)
         if t.get("trend_direction"):
             context_parts.append(str(t["trend_direction"]))
         elif t.get("direction"):
             context_parts.append(str(t["direction"]))
 
-        # Temporal framing (LLM) or sentence snippet (spaCy)
         if t.get("temporal_framing"):
             context_parts.append(str(t["temporal_framing"]).replace("_", " "))
         if t.get("period"):
             context_parts.append(str(t["period"]))
 
-        # Fallback: raw_text (LLM) or sentence (spaCy) or context (legacy)
         if not context_parts:
-            fallback = (
-                t.get("raw_text")
-                or t.get("sentence")
-                or t.get("context")
-                or ""
-            )
+            fallback = t.get("raw_text") or t.get("context") or ""
             if fallback:
                 context_parts.append(str(fallback))
 
@@ -782,24 +756,6 @@ def _cache_banner_markdown() -> str:
             "on **Entity Report** and **Watchlist** automatically."
         )
     return ""
-
-
-def _workflow_intro_markdown() -> str:
-    from demo.bootstrap import ensure_ready
-
-    lines = ensure_ready(_PROJECT_ROOT)
-    setup = "\n".join(f"- {line}" for line in lines) if lines else "- Environment ready."
-    return f"""
-### Workflow
-
-1. **Download data manually** and place files under `data/raw/` (at minimum
-   `ciq_transcripts.parquet` or `transcripts.parquet`, plus any other parquets
-   you use for evaluation).
-2. **Run stages below** — everything happens inside this app; no terminal commands.
-3. Open **Company Analysis** or **Portfolio Screen** once the cache stage finishes.
-
-{setup}
-"""
 
 
 def _reload_cache_choices():

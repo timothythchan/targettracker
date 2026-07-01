@@ -34,7 +34,7 @@ release.
 Usage
 -----
     python scripts/run_rag_matching.py
-    python scripts/run_rag_matching.py --source spacy --limit 50
+    python scripts/run_rag_matching.py --limit 50
     python scripts/run_rag_matching.py --calibration data/processed/mt_calibration_result.json
 """
 
@@ -70,15 +70,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=PROJECT_ROOT / "data",
         help="Project data root (default: ./data).",
-    )
-    p.add_argument(
-        "--source",
-        choices=("auto", "llm", "spacy"),
-        default="auto",
-        help=(
-            "Which targets parquet to score against. 'auto' prefers "
-            "llm_targets.parquet and falls back to spacy_targets.parquet."
-        ),
     )
     p.add_argument(
         "--chroma-dir",
@@ -209,59 +200,33 @@ def _resolve_thresholds(
     return thresholds, notes
 
 
-def _load_targets(data_processed: Path, source: str) -> Tuple["pd.DataFrame", str]:
-    """Load and unify a targets parquet into NB04's working schema."""
+def _load_targets(data_processed: Path) -> "pd.DataFrame":
+    """Load LLM targets parquet into NB04's working schema."""
     import pandas as pd  # lazy
 
     llm_path = data_processed / "llm_targets.parquet"
-    spacy_path = data_processed / "spacy_targets.parquet"
-
-    if source == "auto":
-        if llm_path.exists():
-            source = "llm"
-        elif spacy_path.exists():
-            source = "spacy"
-        else:
-            raise FileNotFoundError(
-                f"Neither {llm_path} nor {spacy_path} exists. Run "
-                "scripts/run_llm_extraction.py or scripts/run_spacy_baseline.py first."
-            )
-
-    if source == "llm":
-        if not llm_path.exists():
-            raise FileNotFoundError(f"LLM targets parquet missing: {llm_path}")
-        raw = pd.read_parquet(llm_path)
-        df = pd.DataFrame({
-            "company_id":  raw["company_id"].astype(str),
-            "quarter":     raw["quarter"].astype(str),
-            "metric_name": raw["metric_name"].astype(str),
-            "context":     raw.get("raw_text", "").astype(str),
-            "is_financial": raw.get("is_financial", True),
-        })
-    else:  # spacy
-        if not spacy_path.exists():
-            raise FileNotFoundError(f"spaCy targets parquet missing: {spacy_path}")
-        raw = pd.read_parquet(spacy_path)
-        quarter = (
-            raw["fiscalyear"].astype("Int64").astype(str)
-            + "Q"
-            + raw["fiscalquarter"].astype("Int64").astype(str)
+    if not llm_path.exists():
+        raise FileNotFoundError(
+            f"LLM targets parquet missing: {llm_path}. "
+            "Run the llm pipeline stage or scripts/run_llm_extraction.py first."
         )
-        df = pd.DataFrame({
-            "company_id":   raw["companyid"].astype(str),
-            "quarter":      quarter,
-            "metric_name":  raw["target_text"].astype(str),
-            "context":      raw.get("sentence", "").astype(str),
-            "is_financial": raw.get("is_financial", False).astype(bool),
-        })
+
+    raw = pd.read_parquet(llm_path)
+    df = pd.DataFrame({
+        "company_id":  raw["company_id"].astype(str),
+        "quarter":     raw["quarter"].astype(str),
+        "metric_name": raw["metric_name"].astype(str),
+        "context":     raw.get("raw_text", "").astype(str),
+        "is_financial": raw.get("is_financial", True),
+    })
 
     df = df.dropna(subset=["company_id", "quarter", "metric_name"]).copy()
     df["metric_name"] = df["metric_name"].str.strip()
     df = df[df["metric_name"] != ""].reset_index(drop=True)
     df["company_id"] = df["company_id"].str.replace(r"\.0$", "", regex=True)
 
-    logger.info("Loaded %d %s targets from %s", len(df), source.upper(), data_processed)
-    return df, source
+    logger.info("Loaded %d LLM targets from %s", len(df), data_processed)
+    return df
 
 
 def _build_batch_iteration_list(
@@ -332,7 +297,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     thresholds, threshold_notes = _resolve_thresholds(args, data_processed)
     logger.info("Thresholds: %s (%s)", thresholds, "; ".join(threshold_notes))
 
-    targets_df, source_label = _load_targets(data_processed, args.source)
+    targets_df = _load_targets(data_processed)
 
     batch_cqs = _build_batch_iteration_list(targets_df)
     if args.limit > 0:
@@ -416,7 +381,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"paper-strict t-{args.historical_lag} "
             "(historical_lag set, single quarter)"
         ),
-        "source_targets": source_label,
+        "source_targets": "llm",
         "n_quarters": int(len(mt_df)),
         "elapsed_seconds": round(elapsed, 1),
         "per_pair_log": (

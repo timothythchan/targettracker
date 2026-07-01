@@ -7,8 +7,7 @@ discoverable entry point::
     earningslens --help
 
     earningslens status        # inspect data/ and report pipeline state
-    earningslens data          # NB01 - WRDS data pull
-    earningslens baseline      # NB02 - spaCy + Moving Targets
+    earningslens data          # NB01 - WRDS data pull (research extra)
     earningslens llm           # NB03 - LLM target extraction
     earningslens rag           # NB04 - semantic MT batch
     earningslens calibrate     # NB04b - threshold calibration
@@ -20,9 +19,10 @@ Each subcommand forwards its remaining arguments to the existing stage
 ``main(argv)`` function, so anything documented in ``--help`` on the
 per-stage script still works after the rename, e.g.::
 
-    earningslens baseline --limit 100
     earningslens llm --backend openai --model gpt-4o-mini
     earningslens app --port 7860 --share
+
+Research-only NB02 baseline: ``pip install ".[baseline]"`` then ``earningslens-baseline``.
 
 The standalone ``scripts/run_*.py`` files are kept as thin wrappers so
 existing automation (Makefile, CI) does not break.
@@ -52,13 +52,7 @@ _STAGES: List[tuple] = [
         "data",
         "src.data_retrieval.cli",
         "main",
-        "WRDS data retrieval — populates data/raw/ (NB01)",
-    ),
-    (
-        "baseline",
-        "src.baseline.baseline_pipeline",
-        "main",
-        "spaCy Moving Targets baseline — writes spacy_targets/spacy_mt_scores (NB02)",
+        "WRDS data retrieval — populates data/raw/ (NB01, research extra)",
     ),
     (
         "llm",

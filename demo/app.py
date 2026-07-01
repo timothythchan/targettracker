@@ -915,36 +915,3 @@ def build_interface() -> "gr.Blocks":
     """Build and return the full Gradio Blocks interface."""
     from demo.interface import build_interface as _build
     return _build()
-
-
-# ===========================================================================
-# Entry point
-# ===========================================================================
-
-def main(argv=None) -> int:
-    """Launch the local Gradio app from a normal Python process."""
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Launch Target Tracker Gradio app")
-    parser.add_argument("--share", action="store_true", help="Create public Gradio link")
-    parser.add_argument("--port", type=int, default=7860, help="Port to listen on")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    args = parser.parse_args(argv)
-
-    from demo.interface import build_interface
-    from demo.theme import APP_CSS, build_theme
-
-    demo = build_interface()
-    demo.launch(
-        server_name=args.host,
-        server_port=args.port,
-        share=args.share,
-        show_error=True,
-        theme=build_theme(),
-        css=APP_CSS,
-    )
-    return 0
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

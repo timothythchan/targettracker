@@ -236,17 +236,13 @@ class LLMTargetExtractor:
     request_timeout_s : float
         Per-request HTTP timeout in seconds.
     max_retries : int
-        Maximum retry attempts on transient API errors before falling back
-        to spaCy (or returning ``[]``).
+        Maximum retry attempts on transient API errors before returning ``[]``.
     rpm_cap : int or None
         Requests-per-minute cap for the token-bucket limiter. ``None`` or
         0 disables the limiter (use only for local backends).
     tpm_cap : int
         Tokens-per-minute cap. Defaults to a generous 2 000 000 which is
         roughly the OpenAI tier-2 ceiling for gpt-4o-mini.
-    spacy_fallback : callable, optional
-        ``(text, component_type) -> List[Dict]`` invoked on terminal LLM
-        failure. Sync or async.
     rate_limiter : TokenBucketLimiter, optional
         Pre-built limiter (overrides ``rpm_cap`` / ``tpm_cap``).
     """
@@ -266,7 +262,6 @@ class LLMTargetExtractor:
         max_retries: int = 3,
         rpm_cap: Optional[int] = 4_500,
         tpm_cap: int = 2_000_000,
-        spacy_fallback: Optional[Callable[..., Any]] = None,
         rate_limiter: Optional[TokenBucketLimiter] = None,
     ) -> None:
         if backend not in ("openai", "local"):
@@ -299,7 +294,6 @@ class LLMTargetExtractor:
             )
         self.request_timeout_s = float(request_timeout_s)
         self.max_retries = int(max(1, max_retries))
-        self.spacy_fallback = spacy_fallback
 
         # ── OpenAI client ─────────────────────────────────────────────────
         if backend == "openai":
@@ -643,8 +637,12 @@ class LLMTargetExtractor:
                         self.max_retries, exc,
                     )
 
-        # All retries exhausted — try spaCy fallback.
-        return await self._spacy_fallback_call(text, component_type, last_exc)
+        logger.error(
+            "_call_llm | all %d retries failed (%s)",
+            self.max_retries,
+            last_exc,
+        )
+        return []
 
     async def _send_to_llm(self, prompt: str) -> Tuple[str, int, int]:
         """Dispatch *prompt* to the active backend.
@@ -912,30 +910,6 @@ class LLMTargetExtractor:
                         seen[canon] = annotated
 
         return list(seen.values())
-
-    # ------------------------------------------------------------------
-    # Internal: spaCy fallback
-    # ------------------------------------------------------------------
-
-    async def _spacy_fallback_call(
-        self,
-        text: str,
-        component_type: int,
-        last_exc: Optional[Exception],
-    ) -> List[Dict[str, Any]]:
-        if self.spacy_fallback is None:
-            logger.debug("_spacy_fallback | no fallback configured (last_exc=%s)", last_exc)
-            return []
-        logger.info("_spacy_fallback | invoking on %d chars (last_exc=%s)",
-                    len(text), last_exc)
-        try:
-            result = self.spacy_fallback(text, component_type)
-            if asyncio.iscoroutine(result):
-                result = await result
-            return result if isinstance(result, list) else []
-        except Exception as exc:  # noqa: BLE001
-            logger.error("_spacy_fallback | also failed: %s", exc)
-            return []
 
     # ------------------------------------------------------------------
     # Telemetry

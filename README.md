@@ -1,8 +1,7 @@
 # Target Tracker
 
 Research replication of the "Moving Targets" earnings-call commitment
-continuity workflow. Original notebooks remain in `notebooks/` for reference;
-the runnable path is a single web app.
+continuity workflow. The runnable path is a single web app.
 
 ## Quick start
 

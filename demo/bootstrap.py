@@ -5,9 +5,8 @@ Users should only need one command::
 
     python app.py
 
-This module installs missing Python packages, downloads the spaCy model, and
-creates the expected ``data/`` folder layout. It runs once per process before
-the Gradio UI is built.
+This module installs missing Python packages and creates the expected
+``data/`` folder layout. It runs once per process before the Gradio UI is built.
 """
 
 from __future__ import annotations
@@ -29,7 +28,6 @@ _RUNTIME_IMPORTS = (
     ("gradio", "gradio"),
     ("pandas", "pandas"),
     ("pyarrow", "pyarrow"),
-    ("spacy", "spacy"),
     ("openai", "openai"),
     ("langgraph", "langgraph"),
     ("chromadb", "chromadb"),
@@ -38,8 +36,6 @@ _RUNTIME_IMPORTS = (
     ("numpy", "numpy"),
     ("tqdm", "tqdm"),
 )
-
-SPACY_MODEL = "en_core_web_sm"
 
 
 def _pip_install(requirements_path: Path) -> None:
@@ -59,25 +55,6 @@ def _missing_packages() -> List[str]:
     return missing
 
 
-def _ensure_spacy_model() -> Optional[str]:
-    try:
-        import spacy
-    except ImportError:
-        return "spaCy is not installed yet."
-
-    try:
-        spacy.load(SPACY_MODEL)
-        return None
-    except OSError:
-        pass
-
-    logger.info("Downloading spaCy model %s (first launch only)…", SPACY_MODEL)
-    subprocess.check_call(
-        [sys.executable, "-m", "spacy", "download", SPACY_MODEL],
-    )
-    return f"Downloaded spaCy model `{SPACY_MODEL}`."
-
-
 def _ensure_data_layout(project_root: Path) -> None:
     for sub in ("raw", "processed", "cache/demo", "cache/chromadb_experiment"):
         (project_root / "data" / sub).mkdir(parents=True, exist_ok=True)
@@ -87,7 +64,7 @@ def ensure_ready(project_root: Optional[Path] = None) -> List[str]:
     """
     Bootstrap the app environment. Safe to call multiple times.
 
-    Returns human-readable status lines suitable for the Workflow tab.
+    Returns human-readable status lines suitable for the Pipeline tab.
     """
     global _BOOTSTRAPPED
     if _BOOTSTRAPPED:
@@ -112,10 +89,6 @@ def ensure_ready(project_root: Optional[Path] = None) -> List[str]:
     messages.append(
         "Data folders ready under `data/raw/`, `data/processed/`, `data/cache/demo/`."
     )
-
-    spacy_note = _ensure_spacy_model()
-    if spacy_note:
-        messages.append(spacy_note)
 
     _BOOTSTRAPPED = True
     if not messages:

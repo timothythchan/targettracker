@@ -5,10 +5,10 @@ This is the only command you need::
 
     python app.py
 
-On first launch the app installs any missing Python packages, downloads the
-spaCy language model, creates the ``data/`` folder layout, and opens the
-Gradio UI. Place your manually downloaded files under ``data/raw/``, then
-run each pipeline stage from the **Pipeline** tab inside the browser.
+On first launch the app installs any missing Python packages, creates the
+``data/`` folder layout, and opens the Gradio UI. Place your manually
+downloaded files under ``data/raw/``, then run each pipeline stage from the
+**Pipeline** tab inside the browser.
 """
 
 from __future__ import annotations

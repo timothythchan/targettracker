@@ -1,7 +1,7 @@
 # Runtime dependencies for ``python app.py``.
 #
 # The app bootstraps itself on first launch: missing packages are installed
-# automatically and the spaCy model is downloaded. Users only need::
+# automatically. Users only need::
 #
 #     python app.py
 #
@@ -10,7 +10,6 @@ pandas>=2.0
 pyarrow>=14
 jinja2>=3.1.5
 numpy>=1.24
-spacy>=3.7
 openai>=1.0
 tqdm>=4.66
 typing-extensions>=4.8

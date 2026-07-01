@@ -160,17 +160,19 @@ def _slice_spacy(
     demo_quarters: List[str],
     demo_companies: List[str],
 ) -> Tuple[List[Dict[str, Any]], "pd.DataFrame"]:
-    """NB06 Cell 10 — slice spaCy outputs to the demo universe + write JSON."""
+    """Legacy NB02 slice — skipped when spaCy artifacts are not present."""
     import pandas as pd
 
     spacy_targets_path = data_processed / "spacy_targets.parquet"
-    spacy_mt_path      = data_processed / "spacy_mt_scores.parquet"
+    spacy_mt_path = data_processed / "spacy_mt_scores.parquet"
 
     if not spacy_targets_path.exists() or not spacy_mt_path.exists():
-        raise FileNotFoundError(
-            "spaCy NB02 outputs missing. Run scripts/run_spacy_baseline.py "
-            f"to materialise {spacy_targets_path} and {spacy_mt_path}."
+        logger.info(
+            "Skipping spaCy cache slice (no %s / %s). LLM-only path.",
+            spacy_targets_path.name,
+            spacy_mt_path.name,
         )
+        return [], pd.DataFrame()
 
     spacy_targets_full = pd.read_parquet(spacy_targets_path)
     spacy_mt_full      = pd.read_parquet(spacy_mt_path)
@@ -412,7 +414,6 @@ async def _run_pipeline_for_pairs(
             "quarter":                 quarter,
             "company_id":              company_id,
             "extracted_targets":       result.get("extracted_targets", []),
-            "spacy_baseline_targets":  result.get("spacy_baseline_targets", []),
             "historical_targets":      result.get("historical_targets", []),
             "continuity_results":      result.get("continuity_results", {}),
             "classification_results":  result.get("classification_results", {}),
@@ -443,32 +444,11 @@ def _build_portfolio_screen(
     pairs: List[Tuple[str, str]],
     demo_quarters: List[str],
     demo_companies: List[str],
-    spacy_mt_path: Path,
     ticker_to_companyid: Dict[str, str],
     cache_dir: Path,
 ) -> Path:
-    """NB06 Cell 18 — build portfolio_screen.json from the pipeline cache."""
-    import pandas as pd
+    """Build portfolio_screen.json from the pipeline cache."""
     from src.data_retrieval.ticker_map import normalise_company_id
-
-    # NB06 Cell 18 reloads the FULL spacy_mt_scores.parquet here (not the
-    # demo-sliced df from _slice_spacy) and keys the lookup on the parquet's
-    # own (company_id, quarter). Reproducing that exactly: when a ticker has
-    # multiple CIQ companyids in the data (legacy entities), keying on
-    # ticker_to_companyid[ticker] would attribute every row to the FIRST
-    # mapped CIQ id and silently mis-key the MT score.
-    spacy_lookup: Dict[Tuple[str, str], float] = {}
-    if spacy_mt_path.exists():
-        spacy_full = pd.read_parquet(spacy_mt_path)
-        if not spacy_full.empty:
-            for _, row in spacy_full.iterrows():
-                cid_clean = normalise_company_id(row.get("company_id"))
-                quarter = str(row.get("quarter") or "")
-                if not cid_clean or not quarter:
-                    continue
-                spacy_lookup[(cid_clean, quarter)] = float(
-                    row.get("mt_score", 0.0) or 0.0
-                )
 
     pair_set = set(pairs)
     portfolio: Dict[str, List[Dict[str, Any]]] = {}
@@ -495,17 +475,17 @@ def _build_portfolio_screen(
             company_id = normalise_company_id(
                 entry.get("company_id", ticker_to_companyid.get(ticker, ""))
             )
-            mt_score_spacy = spacy_lookup.get((company_id, quarter), 0.0)
-            mt_score_llm_continuity = float(cont.get("mt_score", 0.0) or 0.0)
+            mt_score = float(
+                cont.get("mt_score", 0.0) or risk_score or 0.0
+            )
 
             rows.append({
                 "ticker":                   ticker,
                 "company_id":               company_id,
                 "risk_score":               risk_score,
                 "risk_flag":                risk_flag,
-                "mt_score":                 mt_score_spacy,
-                "mt_score_spacy":           mt_score_spacy,
-                "mt_score_llm_continuity":  mt_score_llm_continuity,
+                "mt_score":                 mt_score,
+                "mt_score_llm_continuity":  mt_score,
                 "n_dropped":                n_dropped,
                 "n_extracted":              len(entry.get("extracted_targets", []) or []),
                 "n_hist":                   len(entry.get("historical_targets", []) or []),
@@ -617,7 +597,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         pairs=pairs,
         demo_quarters=demo_quarters,
         demo_companies=demo_companies,
-        spacy_mt_path=data_processed / "spacy_mt_scores.parquet",
         ticker_to_companyid=ticker_to_companyid,
         cache_dir=cache_dir,
     )
@@ -626,7 +605,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     logger.info("=" * 70)
     logger.info("DEMO CACHE SUMMARY")
     for fname in (
-        "spacy_results.json",
         "llm_results.json",
         "pipeline_cache.json",
         "portfolio_screen.json",

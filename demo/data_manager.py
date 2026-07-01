@@ -73,7 +73,7 @@ def _transcripts_ready(data_dir: Path) -> bool:
 
 
 def _workflow_ready(data_dir: Path) -> bool:
-    return (data_dir / "processed/spacy_targets.parquet").exists()
+    return (data_dir / "processed/llm_targets.parquet").exists()
 
 
 def render_step_header(data_dir: Path, cache_ready: bool) -> str:
@@ -155,7 +155,7 @@ def render_watchlist_preview(rows: List[Dict[str, Any]], quarter: str) -> str:
         body.append(
             f"<tr>"
             f"<td><strong>{r.get('ticker', '')}</strong></td>"
-            f"<td>{float(r.get('mt_score_llm', 0) or 0):.3f}</td>"
+            f"<td>{float(r.get('mt_score', r.get('mt_score_llm', r.get('risk_score', 0))) or 0):.3f}</td>"
             f"<td>{int(r.get('n_dropped', 0) or 0)}</td>"
             f'<td class="{_flag_class(flag)}">{flag}</td>'
             f"</tr>"

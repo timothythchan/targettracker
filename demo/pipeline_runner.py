@@ -1,5 +1,5 @@
 """
-pipeline_runner.py — Run pipeline stages in-process for the Gradio Workflow tab.
+pipeline_runner.py — Run pipeline stages in-process for the Gradio Pipeline tab.
 
 The web UI calls stage ``main()`` functions directly instead of shelling out
 to ``python -m src …``, so users never need to touch the CLI.
@@ -23,7 +23,6 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # (stage id, label, default extra argv for the in-app buttons)
 WORKFLOW_STAGES: List[Tuple[str, str, str]] = [
-    ("baseline",  "spaCy baseline + Moving Targets (NB02)",   ""),
     ("llm",       "LLM target extraction (NB03)",             "--limit 50"),
     ("rag",       "Semantic MT batch (NB04)",                ""),
     ("calibrate", "Threshold calibration (NB04b)",           ""),
@@ -32,7 +31,6 @@ WORKFLOW_STAGES: List[Tuple[str, str, str]] = [
 ]
 
 _STAGE_LOADERS: Dict[str, Tuple[str, str]] = {
-    "baseline":  ("src.baseline.baseline_pipeline", "main"),
     "llm":       ("src.llm_extraction.extraction_pipeline", "main"),
     "rag":       ("scripts.run_rag_matching", "main"),
     "calibrate": ("scripts.run_threshold_calibration", "main"),
@@ -71,19 +69,12 @@ def _build_argv(stage: str, extra_args: str, data_dir: Path) -> List[str]:
     except ValueError as exc:
         raise ValueError(f"Could not parse extra args: {exc}") from exc
 
-    if stage == "baseline" and not any(
-        a in argv for a in ("--raw-path", "--input")
-    ):
-        raw = _resolve_raw_transcript_path(data_dir)
-        if raw is not None:
-            argv = ["--raw-path", str(raw), *argv]
-
     if stage == "all":
-        # User downloads data manually — skip the WRDS pull by default.
+        # User downloads data manually — skip WRDS pull and legacy baseline.
         if not any(a == "--skip" for a in argv):
-            argv = ["--skip", "data", *argv]
+            argv = ["--skip", "data", "baseline", *argv]
         if "--start" not in argv:
-            argv = ["--start", "baseline", *argv]
+            argv = ["--start", "llm", *argv]
 
     return argv
 

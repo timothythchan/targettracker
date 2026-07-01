@@ -341,7 +341,6 @@ def _unavailable_result(ticker: str, quarter: str, error: str = "") -> Dict[str,
         "ticker": ticker,
         "fiscal_quarter": quarter,
         "extracted_targets": [],
-        "spacy_baseline_targets": [],
         "historical_targets": [],
         "continuity_results": {"maintained": [], "rephrased": [], "dropped": [], "details": {}},
         "classification_results": {
@@ -408,7 +407,12 @@ def _get_portfolio_data(quarter: str) -> pd.DataFrame:
             ticker = str(r.get("ticker", ""))
             risk_score = float(r.get("risk_score", 0.0) or 0.0)
             n_dropped = int(r.get("n_dropped", 0) or 0)
-            mt_score = float(r.get("mt_score", 0.0) or 0.0)
+            mt_score = float(
+                r.get("mt_score")
+                or r.get("mt_score_llm")
+                or r.get("risk_score", 0.0)
+                or 0.0
+            )
             flag = str(r.get("risk_flag", "") or "")
             if flag.lower() in ("", "unknown", "n/a", "none"):
                 flag = _derive_risk_flag(risk_score)
@@ -416,8 +420,7 @@ def _get_portfolio_data(quarter: str) -> pd.DataFrame:
                 "rank": 0,
                 "ticker": ticker,
                 "company_name": ticker,
-                "mt_score_llm": round(risk_score, 4),
-                "mt_score_spacy": round(mt_score, 4),
+                "mt_score": round(mt_score, 4),
                 "n_dropped": n_dropped,
                 "risk_flag": flag,
             })
@@ -439,19 +442,17 @@ def _get_portfolio_data(quarter: str) -> pd.DataFrame:
                 "rank": 0,
                 "ticker": ticker,
                 "company_name": ticker,
-                "mt_score_llm": round(risk_score, 4),
-                "mt_score_spacy": 0.0,
+                "mt_score": round(risk_score, 4),
                 "n_dropped": n_dropped,
                 "risk_flag": flag,
             })
 
     if not rows:
         return pd.DataFrame(
-            columns=["rank", "ticker", "company_name", "mt_score_llm",
-                     "mt_score_spacy", "n_dropped", "risk_flag"]
+            columns=["rank", "ticker", "company_name", "mt_score", "n_dropped", "risk_flag"]
         )
 
-    df = pd.DataFrame(rows).sort_values("mt_score_llm", ascending=False).head(20).reset_index(drop=True)
+    df = pd.DataFrame(rows).sort_values("mt_score", ascending=False).head(20).reset_index(drop=True)
     df["rank"] = range(1, len(df) + 1)
     return df
 
@@ -694,7 +695,6 @@ def analyse_company(
     progress(0.6, desc="Processing results…")
 
     extracted = result.get("extracted_targets", []) or []
-    spacy_targets = result.get("spacy_baseline_targets", []) or []
     report = result.get("report", {}) or {}
     cls = result.get("classification_results", {}) or {}
     errors = result.get("errors", []) or []
@@ -713,9 +713,6 @@ def analyse_company(
         risk_flag = _derive_risk_flag(risk_score)
 
     gauge_html = _risk_gauge_html(risk_score, risk_flag)
-
-    spacy_df = _targets_to_df(spacy_targets)
-    llm_df = _targets_to_df(extracted)
 
     summary = report.get("summary", "No report generated.")
     recommendation = report.get("recommendation", "")
@@ -739,7 +736,7 @@ def analyse_company(
         errors_md = "*No errors.*"
 
     progress(1.0, desc="Done")
-    return current_df, dropped_df, gauge_html, spacy_df, llm_df, narrative_md, errors_md
+    return current_df, dropped_df, gauge_html, narrative_md, errors_md
 
 
 # ===========================================================================
@@ -756,7 +753,7 @@ def load_portfolio(quarter_display: str) -> Tuple[pd.DataFrame, str]:
             "Run the **cache** stage on Pipeline after upstream steps complete."
         )
     else:
-        status = f"Showing top {len(df)} companies by LLM MT score for **{quarter_display}**."
+        status = f"Showing top {len(df)} entities by MT score for **{quarter_display}**."
     return df, status
 
 
@@ -864,8 +861,7 @@ def drill_down_report(portfolio_df: pd.DataFrame, evt: gr.SelectData) -> str:
         row_idx = evt.index[0]
         row = portfolio_df.iloc[row_idx]
         ticker = row.get("ticker", "")
-        mt_llm = float(row.get("mt_score_llm", 0) or 0)
-        mt_spacy = float(row.get("mt_score_spacy", 0) or 0)
+        mt_score = float(row.get("mt_score", row.get("mt_score_llm", 0)) or 0)
         n_dropped = int(row.get("n_dropped", 0) or 0)
         risk_flag = _normalise_flag(row.get("risk_flag", "LOW"))
         company = row.get("company_name", ticker)
@@ -876,8 +872,7 @@ def drill_down_report(portfolio_df: pd.DataFrame, evt: gr.SelectData) -> str:
 
 | Field | Value |
 |-------|-------|
-| **LLM MT Score** | {mt_llm:.3f} |
-| **spaCy MT Score** | {mt_spacy:.3f} |
+| **MT Score** | {mt_score:.3f} |
 | **Targets Dropped** | {n_dropped} |
 | **Risk Flag** | <span style="color:{colour}">**{risk_flag}**</span> |
 
@@ -920,7 +915,7 @@ def _overview_stats() -> Dict[str, Any]:
             )
         else:
             status_message = (
-                "Corpus detected. Run pipeline stages (baseline → llm → rag → "
+                "Corpus detected. Run pipeline stages (llm → rag → "
                 "calibrate → cache) to populate analysis results."
             )
 

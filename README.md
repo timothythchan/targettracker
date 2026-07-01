@@ -7,8 +7,13 @@ the runnable path is a single web app.
 ## Quick start
 
 ```bash
+pip install -r requirements-app.txt   # first time only
 python app.py
 ```
+
+Equivalent via the package extra::
+
+    pip install ".[app]"
 
 That is the only command you need. On first launch the app:
 
@@ -52,11 +57,20 @@ Place manually downloaded files here:
 The app writes intermediate outputs to `data/processed/` and the UI cache to
 `data/cache/demo/`.
 
-## Advanced: research baseline (optional)
+## Advanced: research stack (optional)
 
-The legacy spaCy baseline pipeline (`src/baseline/`, NB02) remains in the repo
-for notebook replication and academic comparison, but it is not part of the app
-workflow or runtime dependencies. Use `scripts/run_spacy_baseline.py` directly
-if you need those artifacts.
+For WRDS data pulls, spaCy baseline replication (NB02), or evaluation
+notebooks, install the research extras on top of the app runtime::
+
+    pip install -r requirements-research.txt
+
+Or selective extras::
+
+    pip install ".[baseline]"   # spaCy NB02
+    pip install ".[data]"       # WRDS NB01
+    pip install ".[evaluation]" # statsmodels / scipy
+
+The legacy spaCy baseline (`src/baseline/`, `scripts/run_spacy_baseline.py`)
+is not part of the app workflow. Use it only for notebook replication.
 
 See `notebooks/` and `docs/` for the original Colab workflow and methodology.

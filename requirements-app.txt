@@ -1,14 +1,16 @@
 # Runtime dependencies for ``python app.py``.
 #
-# The app bootstraps itself on first launch: missing packages are installed
-# automatically. Users only need::
+# Install directly::
 #
-#     python app.py
+#     pip install -r requirements-app.txt
+#
+# Or via the package extra::
+#
+#     pip install ".[app]"
 #
 gradio>=4.0,<7
 pandas>=2.0
 pyarrow>=14
-jinja2>=3.1.5
 numpy>=1.24
 openai>=1.0
 tqdm>=4.66

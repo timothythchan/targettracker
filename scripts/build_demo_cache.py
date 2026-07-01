@@ -3,26 +3,17 @@
 build_demo_cache.py — Build the Gradio demo cache without opening a notebook
 (port of NB06 ``06_demo_preparation_v2.ipynb``).
 
-The Gradio app at ``demo/app.py`` reads three files from
-``data/cache/demo/``:
+The Gradio app reads these files from ``data/cache/demo/``:
 
     pipeline_cache.json     — full agent pipeline output per (ticker, quarter)
-    portfolio_screen.json   — per-quarter ranked tables for Tab 2
-    spacy_results.json      — sliced spaCy targets + MT (auxiliary)
-    llm_results.json        — sliced LLM targets (auxiliary, fast-path)
-
-Historically these were materialised by Notebook 08 in Colab. This script
-reproduces every cell of NB06 (Cells 5, 7, 8, 10, 12, 13, 18) so the cache
-can be built from the command line or via the app's Workflow tab.
+    portfolio_screen.json   — per-quarter ranked tables for the Watchlist tab
+    llm_results.json        — sliced LLM targets (fast-path for cache build)
 
 Required inputs
 ---------------
-    data/raw/ciq_transcripts.parquet           — from scripts/run_data_retrieval.py
-    data/processed/spacy_targets.parquet       — from scripts/run_spacy_baseline.py
-    data/processed/spacy_mt_scores.parquet     — from scripts/run_spacy_baseline.py
-    data/processed/llm_targets.parquet         — from scripts/run_llm_extraction.py
-                                                  (and optionally
-                                                  scripts/run_rag_matching.py)
+    data/raw/ciq_transcripts.parquet           — manual upload or WRDS pull
+    data/processed/llm_targets.parquet         — from the llm pipeline stage
+                                                  (and optionally rag matching)
 
 If ``llm_targets.parquet`` is missing but ``llm_targets.jsonl`` is present,
 the script can repair the parquet on the fly via
@@ -118,8 +109,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         "--skip-pipeline",
         action="store_true",
         help=(
-            "Build only the lightweight cache files (spacy_results.json, "
-            "llm_results.json, portfolio_screen.json) and skip the "
+            "Build only llm_results.json and portfolio_screen.json and skip the "
             "LangGraph pipeline_cache.json rebuild. Useful for re-slicing "
             "after an upstream parquet refresh."
         ),
@@ -150,122 +140,6 @@ def _parse_pairs(specs: Optional[List[str]]) -> List[Tuple[str, str]]:
         ticker, quarter = token.split("=", 1)
         pairs.append((ticker.strip().upper(), quarter.strip().upper()))
     return pairs
-
-
-def _slice_spacy(
-    data_processed: Path,
-    cache_dir: Path,
-    *,
-    id_to_ticker: Dict[float, str],
-    demo_quarters: List[str],
-    demo_companies: List[str],
-) -> Tuple[List[Dict[str, Any]], "pd.DataFrame"]:
-    """Legacy NB02 slice — skipped when spaCy artifacts are not present."""
-    import pandas as pd
-
-    spacy_targets_path = data_processed / "spacy_targets.parquet"
-    spacy_mt_path = data_processed / "spacy_mt_scores.parquet"
-
-    if not spacy_targets_path.exists() or not spacy_mt_path.exists():
-        logger.info(
-            "Skipping spaCy cache slice (no %s / %s). LLM-only path.",
-            spacy_targets_path.name,
-            spacy_mt_path.name,
-        )
-        return [], pd.DataFrame()
-
-    spacy_targets_full = pd.read_parquet(spacy_targets_path)
-    spacy_mt_full      = pd.read_parquet(spacy_mt_path)
-    logger.info(
-        "Loaded spacy_targets (%d rows), spacy_mt_scores (%d rows)",
-        len(spacy_targets_full), len(spacy_mt_full),
-    )
-
-    demo_companyids = set(id_to_ticker.keys())
-    spacy_targets_full["companyid"] = pd.to_numeric(
-        spacy_targets_full["companyid"], errors="coerce"
-    )
-    demo_tgt = spacy_targets_full[
-        spacy_targets_full["companyid"].isin(demo_companyids)
-    ].copy()
-    demo_tgt["quarter"] = (
-        demo_tgt["fiscalyear"].astype("Int64").astype(str)
-        + "Q"
-        + demo_tgt["fiscalquarter"].astype("Int64").astype(str)
-    )
-    demo_tgt = demo_tgt[demo_tgt["quarter"].isin(demo_quarters)].copy()
-    demo_tgt["ticker"] = demo_tgt["companyid"].astype(float).map(id_to_ticker)
-
-    # Slice MT scores
-    spacy_mt_full["company_id"] = pd.to_numeric(
-        spacy_mt_full["company_id"], errors="coerce"
-    )
-    demo_mt = spacy_mt_full[
-        spacy_mt_full["company_id"].isin(demo_companyids)
-    ].copy()
-    if not demo_mt.empty and not demo_mt["quarter"].astype(str).str.match(r"^\d{4}Q[1-4]$").all():
-        demo_mt["quarter"] = (
-            demo_mt["fiscal_year"].astype("Int64").astype(str)
-            + "Q"
-            + demo_mt["fiscal_quarter"].astype("Int64").astype(str)
-        )
-    demo_mt = demo_mt[demo_mt["quarter"].isin(demo_quarters)].copy()
-    demo_mt["ticker"] = demo_mt["company_id"].astype(float).map(id_to_ticker)
-
-    # NB06 Cell 10 renames first, THEN selects columns. The previous order
-    # ('keep mt_score, rename to mt_spacy, slice by keep_cols') triggered a
-    # KeyError because ``mt_score`` no longer existed after the rename.
-    demo_mt = demo_mt.rename(columns={"mt_score": "mt_spacy"})
-    keep_cols = [c for c in [
-        "ticker", "company_id", "quarter", "mt_spacy",
-        "n_targets", "n_targets_tm4", "n_dropped", "n_new",
-        "dropped_targets", "financial_drop_ratio", "nonfinancial_drop_ratio",
-    ] if c in demo_mt.columns]
-    spacy_mt_df = demo_mt[keep_cols]
-
-    # Build per-(ticker, quarter) target list
-    spacy_results: List[Dict[str, Any]] = []
-    if not demo_tgt.empty:
-        name_col = "normalized_text" if "normalized_text" in demo_tgt.columns else "target_text"
-        for (tkr, qtr), grp in demo_tgt.groupby(["ticker", "quarter"], sort=False):
-            seen = set()
-            targets = []
-            for _, r in grp.iterrows():
-                nm = r.get(name_col, "")
-                if not isinstance(nm, str) or not nm.strip():
-                    continue
-                canon = nm.strip().lower()
-                if canon in seen:
-                    continue
-                seen.add(canon)
-                targets.append({
-                    "metric_name":    nm.strip(),
-                    "target_text":    str(r.get("target_text", nm)),
-                    "canonical_name": canon,
-                })
-            spacy_results.append({
-                "ticker":  str(tkr).upper(),
-                "quarter": str(qtr).upper(),
-                "targets": targets,
-            })
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    spacy_cache_path = cache_dir / "spacy_results.json"
-    # NB06 writes the rows with ``mt_spacy`` as the score column name (and
-    # leaves it that way for any external consumer). The Gradio app only
-    # reads portfolio_screen.json, so this file is informational, but we
-    # follow the notebook's schema rather than re-renaming.
-    with open(spacy_cache_path, "w") as fh:
-        json.dump(
-            {
-                "results":   spacy_results,
-                "mt_scores": spacy_mt_df.to_dict(orient="records"),
-            },
-            fh,
-            default=str,
-        )
-    logger.info("Wrote %s (%d ticker-quarter entries)", spacy_cache_path, len(spacy_results))
-    return spacy_results, spacy_mt_df
 
 
 def _slice_llm(
@@ -552,15 +426,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if missing_map:
         logger.warning("No CIQ companyid for tickers: %s", missing_map)
 
-    # NB06 Cell 10
-    spacy_results, spacy_mt_df = _slice_spacy(
-        data_processed, cache_dir,
-        id_to_ticker=id_to_ticker,
-        demo_quarters=demo_quarters,
-        demo_companies=demo_companies,
-    )
-
-    # NB06 Cell 12
+    # NB06 Cell 12 — slice llm_targets for the demo universe
     llm_results = _slice_llm(
         data_processed, cache_dir,
         id_to_ticker=id_to_ticker,

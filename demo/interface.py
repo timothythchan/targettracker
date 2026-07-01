@@ -150,31 +150,12 @@ def assemble_interface(app: "app_mod") -> gr.Blocks:
                         wrap=True,
                     )
 
-            with gr.Accordion("Extraction comparison", open=False):
-                with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("**spaCy baseline**")
-                        spacy_tbl = gr.DataFrame(
-                            headers=["Metric Name", "Type", "Context"],
-                            interactive=False,
-                            wrap=True,
-                        )
-                    with gr.Column():
-                        gr.Markdown("**LLM extraction**")
-                        llm_tbl = gr.DataFrame(
-                            headers=["Metric Name", "Type", "Context"],
-                            interactive=False,
-                            wrap=True,
-                        )
-
             errors_md = gr.Markdown()
 
             tab1_outputs = [
                 current_targets_tbl,
                 dropped_targets_tbl,
                 gauge_html,
-                spacy_tbl,
-                llm_tbl,
                 narrative_md,
                 errors_md,
             ]
@@ -197,7 +178,7 @@ def assemble_interface(app: "app_mod") -> gr.Blocks:
             portfolio_tbl = gr.DataFrame(
                 headers=[
                     "rank", "ticker", "company_name",
-                    "mt_score_llm", "mt_score_spacy", "n_dropped", "risk_flag",
+                    "mt_score", "n_dropped", "risk_flag",
                 ],
                 interactive=False,
                 wrap=True,

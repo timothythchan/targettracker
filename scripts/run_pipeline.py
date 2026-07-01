@@ -61,8 +61,8 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--start",
         choices=STAGE_ORDER,
-        default="data",
-        help="First stage to run (default: data).",
+        default="llm",
+        help="First stage to run (default: llm).",
     )
     p.add_argument(
         "--stop",

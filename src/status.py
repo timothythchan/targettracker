@@ -111,15 +111,6 @@ def collect_stage_statuses(data_dir: Path) -> List[StageStatus]:
             ],
         ),
         StageStatus(
-            name="baseline",
-            description="spaCy baseline + Moving Targets (NB02)",
-            cli_subcommand="earningslens baseline",
-            artifacts=[
-                _artifact(processed / "spacy_targets.parquet"),
-                _artifact(processed / "spacy_mt_scores.parquet"),
-            ],
-        ),
-        StageStatus(
             name="llm",
             description="LLM target extraction (NB03)",
             cli_subcommand="earningslens llm",
@@ -156,7 +147,6 @@ def collect_stage_statuses(data_dir: Path) -> List[StageStatus]:
             artifacts=[
                 _artifact(cache / "pipeline_cache.json"),
                 _artifact(cache / "portfolio_screen.json"),
-                _artifact(cache / "spacy_results.json"),
                 _artifact(cache / "llm_results.json"),
             ],
         ),

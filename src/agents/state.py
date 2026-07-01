@@ -11,8 +11,6 @@ Design notes
   node has run) remains valid.
 - The ``errors`` list accumulates non-fatal errors so downstream agents can
   inspect and compensate rather than crashing the pipeline.
-- ``spacy_baseline_targets`` is populated by the extractor when it falls back
-  to the spaCy baseline, enabling post-hoc comparison of both signals.
 - ``transcript`` carries an optional structured transcript dict (NB03 v2
   shape: ``{"transcript_id", "company_id", "quarter", "components": [
   {"text", "component_type"}, ...]}``). When present, the Extractor agent
@@ -44,8 +42,7 @@ class PipelineState(TypedDict, total=False):
     ------
     transcript_text : str
         Raw earnings call transcript text to be processed (flat string).
-        Always populated; used by spaCy and by the LLM extractor's flat
-        fallback path.
+        Always populated; used by the LLM extractor's flat fallback path.
     transcript : Dict[str, Any]
         Optional structured transcript dict in NB03 v2 shape::
 
@@ -79,7 +76,7 @@ class PipelineState(TypedDict, total=False):
             2 = Q&A only
             3 = full transcript
     extracted_targets : List[Dict]
-        Targets extracted by the active extractor (LLM or spaCy fallback).
+        Targets extracted by the LLM extractor.
         Each target dict contains at minimum:
             metric_name : str
             context     : str
@@ -111,9 +108,6 @@ class PipelineState(TypedDict, total=False):
             dropped_targets  : List[Dict]  — table rows
             recommendation   : str   — investment implication statement
             generated_at     : str   — ISO 8601 timestamp
-    spacy_baseline_targets : List[Dict]
-        Targets extracted by the spaCy baseline extractor (always populated
-        when the LLM extractor is used, for comparison purposes).
     errors : List[str]
         Accumulated non-fatal error messages from any agent node.
     """
@@ -141,7 +135,6 @@ class PipelineState(TypedDict, total=False):
     # Extractor agent output
     # -----------------------------------------------------------------------
     extracted_targets: List[Dict[str, Any]]
-    spacy_baseline_targets: List[Dict[str, Any]]
 
     # -----------------------------------------------------------------------
     # Comparator agent output
@@ -201,7 +194,6 @@ def make_initial_state(
         fiscal_quarter=fiscal_quarter,
         component_type=component_type,
         extracted_targets=[],
-        spacy_baseline_targets=[],
         historical_targets=[],
         continuity_results={
             "maintained": [],

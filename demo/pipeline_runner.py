@@ -70,9 +70,9 @@ def _build_argv(stage: str, extra_args: str, data_dir: Path) -> List[str]:
         raise ValueError(f"Could not parse extra args: {exc}") from exc
 
     if stage == "all":
-        # User downloads data manually — skip WRDS pull and legacy baseline.
+        # User downloads data manually — skip optional WRDS pull by default.
         if not any(a == "--skip" for a in argv):
-            argv = ["--skip", "data", "baseline", *argv]
+            argv = ["--skip", "data", *argv]
         if "--start" not in argv:
             argv = ["--start", "llm", *argv]
 

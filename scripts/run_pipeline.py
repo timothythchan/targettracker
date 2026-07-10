@@ -1,15 +1,17 @@
 #!/usr/bin/env python
 """
-run_pipeline.py — One-shot orchestrator for the full notebook-free pipeline.
+run_pipeline.py — One-shot orchestrator for the app pipeline.
 
 Runs each stage in order (subject to ``--start`` / ``--stop``):
 
-    1. data         scripts/run_data_retrieval.py            (NB01)
-    2. baseline     scripts/run_spacy_baseline.py            (NB02)
-    3. llm          scripts/run_llm_extraction.py            (NB03)
-    4. rag          scripts/run_rag_matching.py              (NB04)
-    5. calibrate    scripts/run_threshold_calibration.py     (NB04b)
-    6. demo         scripts/build_demo_cache.py              (NB06)
+    1. data         scripts/run_data_retrieval.py            (NB01, optional)
+    2. llm          scripts/run_llm_extraction.py            (NB03)
+    3. rag          scripts/run_rag_matching.py              (NB04)
+    4. calibrate    scripts/run_threshold_calibration.py     (NB04b)
+    5. demo         scripts/build_demo_cache.py              (NB06)
+
+Legacy spaCy baseline (NB02) lives under ``research/`` — see
+``scripts/run_spacy_baseline.py`` and ``pip install ".[baseline]"``.
 
 Each stage is a separate subprocess so a failure in one does not poison
 the next stage's interpreter state.
@@ -42,8 +44,7 @@ logger = logging.getLogger("scripts.run_pipeline")
 
 
 STAGES = [
-    ("data",      "run_data_retrieval.py",        "NB01 - WRDS data pull"),
-    ("baseline",  "run_spacy_baseline.py",        "NB02 - spaCy baseline + MT"),
+    ("data",      "run_data_retrieval.py",        "NB01 - WRDS data pull (optional)"),
     ("llm",       "run_llm_extraction.py",        "NB03 - LLM target extraction"),
     ("rag",       "run_rag_matching.py",          "NB04 - semantic MT batch"),
     ("calibrate", "run_threshold_calibration.py", "NB04b - threshold calibration"),

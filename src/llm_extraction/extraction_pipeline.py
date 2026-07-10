@@ -5,8 +5,7 @@ Orchestrates the full workflow:
   1. Load transcripts from data/raw/
   2. Run LLM extraction (async) across all transcripts
   3. Save results to data/processed/llm_targets.parquet
-  4. Compare target counts against spaCy baseline
-  5. Log and save summary statistics
+  4. Log and save summary statistics
 
 Intended to be run as a script or imported and driven programmatically:
 
@@ -75,7 +74,6 @@ class PipelineConfig:
 
     temperature: float = 0.0
 
-    spacy_baseline_path: str = ""
     output_filename: str = "llm_targets.parquet"
     raw_input_path: str = ""
     processed_output_dir: str = ""
@@ -478,84 +476,6 @@ def repair_parquet_from_jsonl(
 
 
 # ---------------------------------------------------------------------------
-# Baseline comparison
-# ---------------------------------------------------------------------------
-
-def compare_with_baseline(
-    llm_results: Dict[str, List[Dict]],
-    baseline_path: str,
-) -> Dict[str, Any]:
-    """
-    Compare LLM extraction counts against spaCy baseline per transcript.
-
-    Parameters
-    ----------
-    llm_results   : Dict[str, List[Dict]] — LLM extraction output
-    baseline_path : str — path to spaCy targets parquet (must have
-                          ``transcript_id`` column)
-
-    Returns
-    -------
-    Dict with keys:
-        "llm_total"       : int
-        "spacy_total"     : int
-        "llm_only_total"  : int   — targets in LLM but NOT in spaCy
-        "delta_pct"       : float — (llm - spacy) / spacy * 100
-        "per_transcript"  : List[Dict]
-    """
-    try:
-        import pandas as pd
-    except ImportError:
-        logger.warning("compare_with_baseline | pandas not available, skipping comparison")
-        return {}
-
-    if not Path(baseline_path).exists():
-        logger.warning(
-            "compare_with_baseline | baseline not found at %s, skipping", baseline_path
-        )
-        return {}
-
-    baseline_df = pd.read_parquet(baseline_path)
-    spacy_counts: Dict[str, int] = (
-        baseline_df.groupby("transcript_id").size().to_dict()
-        if "transcript_id" in baseline_df.columns
-        else {}
-    )
-
-    llm_counts = {tid: len(targets) for tid, targets in llm_results.items()}
-    all_tids = set(llm_counts) | set(spacy_counts)
-
-    per_transcript = []
-    for tid in sorted(all_tids):
-        llm_n = llm_counts.get(tid, 0)
-        spacy_n = spacy_counts.get(tid, 0)
-        delta = llm_n - spacy_n
-        per_transcript.append({
-            "transcript_id": tid,
-            "llm_targets": llm_n,
-            "spacy_targets": spacy_n,
-            "delta": delta,
-        })
-
-    llm_total = sum(llm_counts.values())
-    spacy_total = sum(spacy_counts.values())
-    delta_pct = ((llm_total - spacy_total) / spacy_total * 100) if spacy_total else float("nan")
-
-    summary = {
-        "llm_total": llm_total,
-        "spacy_total": spacy_total,
-        "delta_pct": round(delta_pct, 2),
-        "per_transcript": per_transcript,
-    }
-
-    logger.info(
-        "compare_with_baseline | LLM=%d  spaCy=%d  Δ=%.1f%%",
-        llm_total, spacy_total, delta_pct,
-    )
-    return summary
-
-
-# ---------------------------------------------------------------------------
 # Summary statistics
 # ---------------------------------------------------------------------------
 
@@ -725,12 +645,6 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     # ── Save results ───────────────────────────────────────────────────────
     n_saved = save_results(results, output_path)
 
-    # ── Compare with spaCy baseline ────────────────────────────────────────
-    baseline_path = config.spacy_baseline_path or str(
-        processed_dir / "spacy_targets.parquet"
-    )
-    comparison = compare_with_baseline(results, baseline_path)
-
     # ── Summary statistics ─────────────────────────────────────────────────
     stats = compute_summary_stats(results)
     telemetry = extractor.telemetry
@@ -739,7 +653,6 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
         "results_path": output_path,
         "total_targets": n_saved,
         "extraction_time_seconds": round(elapsed_extract, 2),
-        "comparison_vs_spacy": comparison,
         "stats": stats,
         "telemetry": telemetry,
     }
@@ -751,13 +664,6 @@ async def run_pipeline(config: PipelineConfig) -> Dict[str, Any]:
     logger.info("  Total targets saved   : %d", n_saved)
     logger.info("  Output path           : %s", output_path)
     logger.info("  Extraction time       : %.2fs", elapsed_extract)
-    if comparison:
-        logger.info(
-            "  vs. spaCy baseline    : LLM=%d  spaCy=%d  Δ=%.1f%%",
-            comparison.get("llm_total", 0),
-            comparison.get("spacy_total", 0),
-            comparison.get("delta_pct", 0.0),
-        )
     logger.info(
         "  Token usage           : %d total  (%d requests, %d failures)",
         telemetry["total_tokens_used"],
@@ -892,11 +798,6 @@ def _build_arg_parser() -> argparse.ArgumentParser:
         help="Sampling temperature (default: 0.0)",
     )
     p.add_argument(
-        "--spacy-baseline",
-        default="",
-        help="Path to spaCy baseline parquet for comparison",
-    )
-    p.add_argument(
         "--output",
         default="llm_targets.parquet",
         help="Output filename under data/processed/ (default: llm_targets.parquet)",
@@ -940,7 +841,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         rpm_cap=args.rpm_cap,
         tpm_cap=args.tpm_cap,
         temperature=args.temperature,
-        spacy_baseline_path=args.spacy_baseline,
         output_filename=args.output,
         raw_input_path=args.raw_input_path,
         processed_output_dir=args.output_dir,

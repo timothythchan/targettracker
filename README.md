@@ -20,6 +20,21 @@ That is the only command you need. On first launch the app:
 - creates the `data/` folder layout
 - opens the Gradio UI at http://localhost:7860
 
+## Launching the app
+
+```bash
+python app.py
+# or: make app
+```
+
+The server binds to **http://0.0.0.0:7860** by default.
+
+**In Cursor (cloud / web testing):** run the command above in the integrated
+terminal (or a tmux session for a long-running process). Then open the forwarded
+port **7860** from Cursor's **Ports** panel — it should show a preview URL for
+the Gradio UI. If the Ports panel is empty, try `python app.py --host 0.0.0.0
+--port 7860` and refresh the panel after the "Running on local URL" line appears.
+
 ## Workflow inside the app
 
 1. **Download data manually** and place files under `data/raw/` (at minimum
@@ -70,6 +85,6 @@ Or selective extras::
     pip install ".[evaluation]" # statsmodels / scipy
 
 The legacy spaCy baseline (`src/baseline/`, `scripts/run_spacy_baseline.py`)
-is not part of the app workflow. Use it only for notebook replication.
+is not part of the app workflow. See `research/README.md`.
 
-See `notebooks/` and `docs/` for the original Colab workflow and methodology.
+See `docs/` for the original Colab workflow and methodology.

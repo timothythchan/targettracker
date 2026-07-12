@@ -1,4 +1,4 @@
-# Target Tracker
+# Tracker
 
 Research replication of the "Moving Targets" earnings-call commitment
 continuity workflow. The runnable path is a single web app.
